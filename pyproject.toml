@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lidar-slam-hdmap-pipeline"
+version = "0.1.0"
+description = "LiDAR-inertial SLAM with HD Map feature extraction pipeline"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy<2.0",
+    "gtsam",
+    "kiss-icp",
+    "open3d",
+    "evo",
+    "matplotlib",
+    "filterpy",
+    "pyyaml",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "pre-commit",
+    "ruff",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["src*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

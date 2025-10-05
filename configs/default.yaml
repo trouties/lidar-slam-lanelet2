@@ -1,0 +1,21 @@
+# Default configuration for LiDAR SLAM HD Map Pipeline
+
+data:
+  kitti_root: "~/data/kitti/odometry/dataset"
+  sequence: "00"
+
+kiss_icp:
+  max_range: 100.0
+  min_range: 5.0
+  voxel_size: 1.0
+
+gtsam:
+  odom_sigmas: [0.1, 0.1, 0.1, 0.01, 0.01, 0.01]  # x, y, z, roll, pitch, yaw
+  gps_sigmas: [0.5, 0.5, 1.0]  # x, y, z
+
+ekf:
+  process_noise: 0.01
+  measurement_noise: 0.1
+
+mapping:
+  voxel_size: 0.1
