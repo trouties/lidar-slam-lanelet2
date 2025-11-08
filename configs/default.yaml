@@ -20,8 +20,11 @@ loop_closure:
   icp_fitness_threshold: 0.3
 
 ekf:
-  process_noise: 0.01
-  measurement_noise: 0.1
+  process_noise_pos: 0.1
+  process_noise_vel: 0.5
+  process_noise_rot: 0.01
+  measurement_noise_pos: 0.05
+  measurement_noise_rot: 0.01
 
 mapping:
   voxel_size: 0.1

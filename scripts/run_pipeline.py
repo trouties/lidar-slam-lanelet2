@@ -5,9 +5,11 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
+import numpy as np
 import yaml
 
 from src.data.kitti_loader import KITTIDataset
+from src.fusion.eskf import ESKF
 from src.odometry.kiss_icp_wrapper import KissICPOdometry, evaluate_odometry
 from src.optimization.loop_closure import LoopClosureDetector
 from src.optimization.pose_graph import PoseGraphOptimizer
@@ -107,6 +109,34 @@ def main() -> None:
         result_opt = evaluate_odometry(optimized_poses[:n], dataset.poses[:n])
         print(f"  Optimized APE RMSE: {result_opt['ape']['rmse']:.4f} m")
         print(f"  Optimized APE Mean: {result_opt['ape']['mean']:.4f} m")
+
+    # --- Stage 4: ESKF Sensor Fusion ---
+    print("\n=== Stage 4: ESKF Sensor Fusion ===")
+    ekf_cfg = config.get("ekf", {})
+    eskf = ESKF(
+        process_noise_pos=ekf_cfg.get("process_noise_pos", 0.1),
+        process_noise_vel=ekf_cfg.get("process_noise_vel", 0.5),
+        process_noise_rot=ekf_cfg.get("process_noise_rot", 0.01),
+        measurement_noise_pos=ekf_cfg.get("measurement_noise_pos", 0.05),
+        measurement_noise_rot=ekf_cfg.get("measurement_noise_rot", 0.01),
+    )
+
+    if dataset.timestamps is not None:
+        fused_poses = eskf.run(optimized_poses, dataset.timestamps)
+    else:
+        # Fallback: assume 10 Hz
+        timestamps = np.arange(len(optimized_poses)) * 0.1
+        fused_poses = eskf.run(optimized_poses, timestamps)
+
+    fused_path = output_dir / f"poses_fused_{dataset.sequence}.txt"
+    KissICPOdometry.save_poses_kitti_format(fused_poses, fused_path)
+    print(f"  Saved {len(fused_poses)} fused poses to {fused_path}")
+
+    if dataset.poses is not None:
+        n = min(len(fused_poses), len(dataset.poses))
+        result_fused = evaluate_odometry(fused_poses[:n], dataset.poses[:n])
+        print(f"  Fused APE RMSE: {result_fused['ape']['rmse']:.4f} m")
+        print(f"  Fused APE Mean: {result_fused['ape']['mean']:.4f} m")
 
     print("\nDone.")
 
