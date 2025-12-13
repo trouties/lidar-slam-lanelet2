@@ -27,7 +27,14 @@ ekf:
   measurement_noise_rot: 0.01
 
 mapping:
-  voxel_size: 0.1
+  voxel_size: 0.1              # 全局地图体素大小 (m)
+  max_range: 50.0              # 单帧点云最大距离过滤 (m)
+  downsample_every: 50         # 每 N 帧触发一次增量降采样
+  road_z_min: -1.95            # 路面 z 下界 (Velodyne 帧, 地面约 -1.73m)
+  road_z_max: -1.45            # 路面 z 上界
+  intensity_threshold: 0.35    # 车道线反射率阈值 (KITTI reflectance in [0,1])
+  dbscan_eps: 0.5              # DBSCAN 聚类半径 (m)
+  dbscan_min_points: 10        # 最小簇点数
 
 output:
   dir: "results"

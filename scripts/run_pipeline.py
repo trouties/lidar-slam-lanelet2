@@ -10,6 +10,13 @@ import yaml
 
 from src.data.kitti_loader import KITTIDataset
 from src.fusion.eskf import ESKF
+from src.mapping import (
+    MapBuilder,
+    cluster_points,
+    extract_lane_markings,
+    extract_road_surface,
+    save_features_geojson,
+)
 from src.odometry.kiss_icp_wrapper import (
     KissICPOdometry,
     evaluate_odometry,
@@ -158,6 +165,51 @@ def main() -> None:
     print(f"  Saved {len(fused_poses)} fused poses to {fused_path}")
 
     _eval("Fused", fused_poses, gt_velo)
+
+    # --- Stage 5: Semantic Map Assembly & Feature Extraction ---
+    print("\n=== Stage 5: Semantic Map Assembly ===")
+    mapping_cfg = config.get("mapping", {})
+    builder = MapBuilder(
+        voxel_size=mapping_cfg.get("voxel_size", 0.1),
+        max_range=mapping_cfg.get("max_range", 50.0),
+        downsample_every=mapping_cfg.get("downsample_every", 50),
+    )
+    global_map = builder.build(dataset, fused_poses)
+    print(f"  Global map points: {len(global_map.points):,}")
+
+    map_path = output_dir / f"global_map_{dataset.sequence}.pcd"
+    MapBuilder.save(global_map, map_path)
+    print(f"  Saved map to {map_path}")
+
+    # Feature extraction from the global map.
+    xyz = np.asarray(global_map.points)
+    intensities = np.asarray(global_map.colors)[:, 0]  # colors encode reflectance
+
+    road_pts, road_int = extract_road_surface(
+        xyz,
+        intensities,
+        z_min=mapping_cfg.get("road_z_min", -1.95),
+        z_max=mapping_cfg.get("road_z_max", -1.45),
+    )
+    print(f"  Road surface points: {len(road_pts):,}")
+
+    lane_pts = extract_lane_markings(
+        road_pts,
+        road_int,
+        intensity_threshold=mapping_cfg.get("intensity_threshold", 0.35),
+    )
+    print(f"  Lane marking candidates: {len(lane_pts):,}")
+
+    clusters = cluster_points(
+        lane_pts,
+        eps=mapping_cfg.get("dbscan_eps", 0.5),
+        min_points=mapping_cfg.get("dbscan_min_points", 10),
+    )
+    print(f"  Lane marking clusters: {len(clusters)}")
+
+    geojson_path = output_dir / f"features_{dataset.sequence}.geojson"
+    save_features_geojson(clusters, geojson_path, feature_type="lane_marking")
+    print(f"  Saved features to {geojson_path}")
 
     print("\nDone.")
 
