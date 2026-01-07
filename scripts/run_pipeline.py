@@ -9,6 +9,7 @@ import numpy as np
 import yaml
 
 from src.data.kitti_loader import KITTIDataset
+from src.export import export_lanelet2_osm
 from src.fusion.eskf import ESKF
 from src.mapping import (
     MapBuilder,
@@ -210,6 +211,17 @@ def main() -> None:
     geojson_path = output_dir / f"features_{dataset.sequence}.geojson"
     save_features_geojson(clusters, geojson_path, feature_type="lane_marking")
     print(f"  Saved features to {geojson_path}")
+
+    # --- Stage 6: Lanelet2 HD Map Export ---
+    print("\n=== Stage 6: Lanelet2 HD Map Export ===")
+    export_cfg = config.get("export", {})
+    osm_path = output_dir / f"map_{dataset.sequence}.osm"
+    counts = export_lanelet2_osm(clusters, osm_path, **export_cfg)
+    print(
+        f"  Classified: thin={counts['line_thin']} thick={counts['line_thick']} "
+        f"area={counts['area']} dropped={counts['dropped']} (of {counts['total_input']})"
+    )
+    print(f"  Saved Lanelet2 map to {osm_path}")
 
     print("\nDone.")
 

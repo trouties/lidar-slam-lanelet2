@@ -36,5 +36,14 @@ mapping:
   dbscan_eps: 0.7              # DBSCAN 聚类半径 (m); 桥接车道虚线内部碎片
   dbscan_min_points: 40        # 最小核心邻域; 过滤道路反光噪点
 
+export:
+  lat0: 49.0                       # 假 WGS84 原点 (KITTI Karlsruhe 附近); seq 00 无真实 GPS
+  lon0: 8.4
+  min_linearity: 0.75              # PCA xy linearity 阈值; line_* 类别下限
+  min_length: 1.0                  # m; 主轴跨度低于此则丢为 noise
+  line_thin_max_thickness: 0.8     # m; 匹配 dbscan_eps=0.7 + 余量
+  line_thick_max_thickness: 2.0    # m; 超过此值归为 area (人行横道/路口涂装)
+  polyline_bin_size: 0.5           # m; 把线状簇压成 polyline 的分箱宽度
+
 output:
   dir: "results"
