@@ -260,3 +260,38 @@ class MapBuilder:
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
         o3d.io.write_point_cloud(str(path), pcd)
+
+    @staticmethod
+    def downsample_existing(
+        pcd: o3d.geometry.PointCloud, voxel_size: float
+    ) -> o3d.geometry.PointCloud:
+        """Re-voxelize an already-aggregated map to a coarser resolution.
+
+        Used to go from the cached ``master_voxel_size`` (e.g. 0.05 m) master
+        cloud to the Stage 5 working ``voxel_size`` (e.g. 0.15 m) without
+        re-running the full per-frame accumulation. Reuses the numpy-native
+        ``_voxel_aggregate`` for memory safety — ``pipeline-notes.md:82-99``
+        forbids ``o3d.voxel_down_sample`` on aggregated state because it
+        thrashes sort buffers on large inputs.
+
+        Reflectance is preserved via the ``colors`` channel convention used
+        by :py:meth:`finalize`.
+        """
+        if len(pcd.points) == 0:
+            return o3d.geometry.PointCloud()
+
+        points = np.ascontiguousarray(np.asarray(pcd.points), dtype=np.float32)
+        colors = np.asarray(pcd.colors)
+        if colors.size == 0:
+            intensities = np.zeros(points.shape[0], dtype=np.float32)
+        else:
+            intensities = np.ascontiguousarray(colors[:, 0], dtype=np.float32)
+
+        mean_xyz, mean_i, _ = _voxel_aggregate(points, intensities, voxel_size, weights=None)
+
+        out = o3d.geometry.PointCloud()
+        out.points = o3d.utility.Vector3dVector(mean_xyz.astype(np.float64))
+        out.colors = o3d.utility.Vector3dVector(
+            np.repeat(mean_i.astype(np.float64)[:, None], 3, axis=1)
+        )
+        return out

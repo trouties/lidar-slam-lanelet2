@@ -27,7 +27,10 @@ ekf:
   measurement_noise_rot: 0.01
 
 mapping:
-  voxel_size: 0.15             # 全局地图体素大小 (m); 匹配车道线宽
+  master_voxel_size: 0.10      # 主缓存体素 (m); Stage 4→5 边界, Stage 5 从此降采样到 voxel_size
+                               # 实测 voxel=0.05 在 seq 00 触发 OOM (13.7 GB 峰值 > 15 GB RAM)
+                               # 0.10 仍比 working 0.15 细, 峰值 ~2 GB 安全
+  voxel_size: 0.15             # Stage 5 工作体素 (m); 匹配车道线宽
   max_range: 30.0              # 单帧点云最大距离过滤 (m); 远点 ICP 不确定
   downsample_every: 500        # 每 N 帧触发一次增量 merge
   road_z_min: -2.0             # 路面 z 下界 (Velodyne 帧, 地面约 -1.73m)
@@ -44,6 +47,11 @@ export:
   line_thin_max_thickness: 0.8     # m; 匹配 dbscan_eps=0.7 + 余量
   line_thick_max_thickness: 2.0    # m; 超过此值归为 area (人行横道/路口涂装)
   polyline_bin_size: 0.5           # m; 把线状簇压成 polyline 的分箱宽度
+
+cache:
+  enabled: true
+  root: "cache/kitti"          # 相对仓库根; Stage 1-5 分层缓存
+                               # 见 src/cache/layered_cache.py
 
 output:
   dir: "results"
