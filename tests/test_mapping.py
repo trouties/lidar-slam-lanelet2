@@ -9,6 +9,7 @@ import numpy as np
 from src.mapping import (
     MapBuilder,
     cluster_points,
+    extract_curbs,
     extract_lane_markings,
     extract_road_surface,
     save_features_geojson,
@@ -282,6 +283,144 @@ def test_cluster_points_trim_disabled_is_regression_anchor():
     assert clusters_disabled[0].shape[0] == 210
     assert len(clusters_default) == 1
     assert clusters_default[0].shape[0] < 210
+
+
+# ---------------------------------------------------------------------------
+# Curb detection tests
+# ---------------------------------------------------------------------------
+
+
+def _flat_ground_xyz(
+    n: int,
+    z: float = -1.73,
+    x_range: tuple[float, float] = (-5.0, 5.0),
+    y_range: tuple[float, float] = (-2.5, 2.5),
+    seed: int = 0,
+) -> np.ndarray:
+    rng = np.random.default_rng(seed)
+    x = rng.uniform(*x_range, size=n)
+    y = rng.uniform(*y_range, size=n)
+    z_col = np.full(n, z, dtype=np.float64)
+    return np.column_stack([x, y, z_col])
+
+
+def test_extract_curbs_detects_height_step():
+    """A 0.15 m ridge along y=0 on a flat ground patch should light up the
+    curb detector in cells covering the ridge and return only the top-of-
+    step slab."""
+    ground = _flat_ground_xyz(n=4000, z=-1.73, seed=1)
+    # 10 m long, 0.4 m wide raised strip at y in [0.0, 0.4], z = -1.58.
+    rng = np.random.default_rng(2)
+    n_ridge = 1500
+    ridge = np.column_stack(
+        [
+            rng.uniform(-5.0, 5.0, size=n_ridge),
+            rng.uniform(0.0, 0.4, size=n_ridge),
+            np.full(n_ridge, -1.58),
+        ]
+    )
+    points = np.vstack([ground, ridge])
+
+    curb_pts = extract_curbs(
+        points,
+        grid_size=0.3,
+        z_min=-2.0,
+        z_max=-1.2,
+        height_min=0.10,
+        height_max=0.25,
+        top_band=0.03,
+    )
+
+    assert curb_pts.shape[0] > 50, f"expected many curb-top points, got {curb_pts.shape[0]}"
+    # All returned points should be on the ridge (y near [0, 0.4], z near -1.58).
+    assert curb_pts[:, 1].min() >= -0.05
+    assert curb_pts[:, 1].max() <= 0.45
+    np.testing.assert_allclose(curb_pts[:, 2], -1.58, atol=0.05)
+
+
+def test_extract_curbs_ignores_flat_ground():
+    """A pure flat-ground patch has no height steps, so the detector must
+    return an empty point set."""
+    ground = _flat_ground_xyz(n=10_000, z=-1.73, seed=3)
+
+    curb_pts = extract_curbs(
+        ground,
+        grid_size=0.3,
+        z_min=-2.0,
+        z_max=-1.2,
+        height_min=0.10,
+        height_max=0.25,
+    )
+
+    assert curb_pts.shape == (0, 3)
+
+
+def test_extract_curbs_rejects_tall_walls():
+    """A 0.5 m riser (above ``height_max``) must be rejected — curbs are
+    specifically the short-step regime; taller jumps are walls / vehicles."""
+    ground = _flat_ground_xyz(n=3000, z=-1.73, seed=4)
+    rng = np.random.default_rng(5)
+    n_wall = 1500
+    wall = np.column_stack(
+        [
+            rng.uniform(-5.0, 5.0, size=n_wall),
+            rng.uniform(0.0, 0.4, size=n_wall),
+            # A 0.5 m riser: wall tops at z = -1.23, which is ABOVE
+            # height_max=0.25 relative to the ground at -1.73.
+            np.full(n_wall, -1.23),
+        ]
+    )
+    points = np.vstack([ground, wall])
+
+    curb_pts = extract_curbs(
+        points,
+        grid_size=0.3,
+        z_min=-2.0,
+        z_max=-1.2,
+        height_min=0.10,
+        height_max=0.25,
+    )
+
+    assert curb_pts.shape == (0, 3)
+
+
+def test_extract_curbs_empty_input():
+    """Empty input -> empty (0, 3) output, no crash."""
+    out = extract_curbs(np.zeros((0, 3)))
+    assert out.shape == (0, 3)
+
+
+def test_extract_curbs_respects_z_window():
+    """Points whose z is entirely outside [z_min, z_max] are filtered even
+    if they would otherwise form a valid height step."""
+    # A 0.15 m ridge, but the entire thing is above z_max=-1.2 -> rejected.
+    rng = np.random.default_rng(6)
+    high_floor = np.column_stack(
+        [
+            rng.uniform(-5.0, 5.0, size=2000),
+            rng.uniform(-2.0, 2.0, size=2000),
+            np.full(2000, -0.5),  # well above z_max
+        ]
+    )
+    high_ridge = np.column_stack(
+        [
+            rng.uniform(-5.0, 5.0, size=1000),
+            rng.uniform(0.0, 0.3, size=1000),
+            np.full(1000, -0.35),
+        ]
+    )
+    points = np.vstack([high_floor, high_ridge])
+
+    curb_pts = extract_curbs(
+        points,
+        grid_size=0.3,
+        z_min=-2.0,
+        z_max=-1.2,
+        height_min=0.10,
+        height_max=0.25,
+    )
+
+    assert curb_pts.shape == (0, 3)
 
 
 def test_save_features_geojson_writes_valid_json(tmp_path):

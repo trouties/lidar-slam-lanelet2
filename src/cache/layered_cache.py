@@ -52,7 +52,7 @@ _STAGE_FILES: dict[str, list[str]] = {
     "optimized": ["optimized.npz"],
     "fused": ["fused.npz"],
     "map_master": ["global_map_master.npz"],
-    "stage5": ["stage5.npz", "stage5_features.geojson"],
+    "stage5": ["stage5.npz", "stage5_features.geojson", "stage5_curbs.geojson"],
 }
 
 
@@ -243,23 +243,53 @@ class LayeredCache:
         self._save_pcd_npz(pcd, self.root / "global_map_master.npz")
         self._write_metadata_entry("map_master", config, metrics)
 
-    def load_stage5(self, config: dict) -> tuple[o3d.geometry.PointCloud, list[np.ndarray]] | None:
+    def load_stage5(
+        self, config: dict
+    ) -> tuple[o3d.geometry.PointCloud, list[np.ndarray], list[np.ndarray]] | None:
+        """Load the Stage 5 artifacts.
+
+        Returns:
+            ``(working_pcd, lane_clusters, curb_clusters)`` on a cache hit,
+            ``None`` otherwise. ``curb_clusters`` is an empty list when
+            the sequence has no curb features.
+        """
         if not self._is_fresh("stage5", config):
             return None
         pcd = self._load_pcd_npz(self.root / "stage5.npz")
         clusters = self._load_clusters_geojson(self.root / "stage5_features.geojson")
-        return pcd, clusters
+        curbs = self._load_clusters_geojson(self.root / "stage5_curbs.geojson")
+        return pcd, clusters, curbs
 
     def save_stage5(
         self,
         pcd: o3d.geometry.PointCloud,
         clusters: list[np.ndarray],
         config: dict,
+        *,
+        curb_clusters: list[np.ndarray] | None = None,
         metrics: dict | None = None,
     ) -> None:
+        """Persist the Stage 5 artifacts.
+
+        Args:
+            pcd: Working-resolution global map.
+            clusters: Lane-marking clusters (``(k_i, 3)`` arrays).
+            config: Full pipeline config (for hashing).
+            curb_clusters: Optional curb clusters; defaults to an empty
+                list so the sibling ``stage5_curbs.geojson`` is always
+                written and the cache freshness check stays consistent.
+            metrics: Optional metrics dict stored in ``metadata.yaml``.
+        """
         self.root.mkdir(parents=True, exist_ok=True)
         self._save_pcd_npz(pcd, self.root / "stage5.npz")
-        self._save_clusters_geojson(clusters, self.root / "stage5_features.geojson")
+        self._save_clusters_geojson(
+            clusters, self.root / "stage5_features.geojson", feature_type="lane_marking"
+        )
+        self._save_clusters_geojson(
+            curb_clusters or [],
+            self.root / "stage5_curbs.geojson",
+            feature_type="curb",
+        )
         self._write_metadata_entry("stage5", config, metrics)
 
     # ------------------------------------------------------------------
@@ -308,8 +338,17 @@ class LayeredCache:
         return pcd
 
     @staticmethod
-    def _save_clusters_geojson(clusters: list[np.ndarray], path: Path) -> None:
-        """Minimal GeoJSON dump of cluster points (same schema as Stage 5 output)."""
+    def _save_clusters_geojson(
+        clusters: list[np.ndarray],
+        path: Path,
+        feature_type: str = "lane_marking",
+    ) -> None:
+        """Minimal GeoJSON dump of cluster points (same schema as Stage 5 output).
+
+        ``feature_type`` is written into each feature's ``properties.type``;
+        defaults to ``lane_marking`` for backward compatibility with the
+        existing lane-marking cache artifact.
+        """
         features: list[dict[str, Any]] = []
         for idx, cluster in enumerate(clusters):
             coords = [[float(x), float(y), float(z)] for x, y, z in cluster]
@@ -319,7 +358,7 @@ class LayeredCache:
                     "geometry": {"type": "MultiPoint", "coordinates": coords},
                     "properties": {
                         "id": idx,
-                        "type": "lane_marking",
+                        "type": feature_type,
                         "point_count": int(cluster.shape[0]),
                     },
                 }

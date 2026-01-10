@@ -22,6 +22,7 @@ from src.fusion.eskf import ESKF
 from src.mapping import (
     MapBuilder,
     cluster_points,
+    extract_curbs,
     extract_lane_markings,
     extract_road_surface,
     save_features_geojson,
@@ -326,11 +327,12 @@ def run_pipeline_cached(
 
     stage5_cached = cache.load_stage5(cfg) if cache else None
     if stage5_cached is not None:
-        working_pcd, clusters = stage5_cached
+        working_pcd, clusters, curb_clusters = stage5_cached
         if verbose:
             print(
                 f"  [cache hit] Stage 5: "
-                f"{len(working_pcd.points):,} points, {len(clusters)} clusters"
+                f"{len(working_pcd.points):,} points, {len(clusters)} lane clusters, "
+                f"{len(curb_clusters)} curb clusters"
             )
         summary["cache_hits"]["stage5"] = True
         # Rehydrate diagnostic counts from the cache metadata (they were
@@ -339,6 +341,7 @@ def run_pipeline_cached(
         stage5_meta = (meta_snapshot.get("stage5") or {}).get("metrics", {})
         road_pts_count = stage5_meta.get("road_point_count")
         lane_pts_count = stage5_meta.get("lane_candidate_count")
+        curb_pts_count = stage5_meta.get("curb_point_count")
     else:
         working_pcd = MapBuilder.downsample_existing(master_pcd, working_voxel)
         if verbose:
@@ -376,33 +379,59 @@ def run_pipeline_cached(
         )
         if verbose:
             print(f"  Lane marking clusters: {len(clusters)}")
+
+        # Curb detection: xy-grid height-step filter + DBSCAN. Runs on the
+        # full working point cloud (not the intensity-filtered lane
+        # candidates) because curbs are a geometric feature, not a
+        # reflectance one.
+        curb_pts = extract_curbs(
+            xyz,
+            grid_size=float(mapping_cfg.get("curb_grid_size", 0.30)),
+            z_min=float(mapping_cfg.get("curb_z_min", -2.0)),
+            z_max=float(mapping_cfg.get("curb_z_max", -1.2)),
+            height_min=float(mapping_cfg.get("curb_height_min", 0.10)),
+            height_max=float(mapping_cfg.get("curb_height_max", 0.25)),
+        )
+        curb_pts_count = int(curb_pts.shape[0])
+        if verbose:
+            print(f"  Curb candidate points: {curb_pts_count:,}")
+
+        curb_clusters = cluster_points(
+            curb_pts,
+            eps=float(mapping_cfg.get("curb_dbscan_eps", 0.5)),
+            min_points=int(mapping_cfg.get("curb_dbscan_min_points", 40)),
+        )
+        if verbose:
+            print(f"  Curb clusters: {len(curb_clusters)}")
         summary["cache_hits"]["stage5"] = False
 
     cluster_stats = _cluster_size_stats(clusters)
-    summary["metrics"]["stage5"] = {
+    stage5_metrics = {
         "working_point_count": len(working_pcd.points),
         "road_point_count": road_pts_count,
         "lane_candidate_count": lane_pts_count,
+        "curb_point_count": curb_pts_count,
+        "curb_cluster_count": len(curb_clusters),
         **cluster_stats,
     }
+    summary["metrics"]["stage5"] = stage5_metrics
 
     if cache is not None and not summary["cache_hits"]["stage5"]:
         cache.save_stage5(
             working_pcd,
             clusters,
             cfg,
-            metrics={
-                "working_point_count": len(working_pcd.points),
-                "road_point_count": road_pts_count,
-                "lane_candidate_count": lane_pts_count,
-                **cluster_stats,
-            },
+            curb_clusters=curb_clusters,
+            metrics=stage5_metrics,
         )
 
     # Human-readable results dir outputs (overwrite each run).
     MapBuilder.save(working_pcd, output_dir / f"global_map_{sequence}.pcd")
     save_features_geojson(
         clusters, output_dir / f"features_{sequence}.geojson", feature_type="lane_marking"
+    )
+    save_features_geojson(
+        curb_clusters, output_dir / f"curbs_{sequence}.geojson", feature_type="curb"
     )
 
     # --- Stage 6: Lanelet2 HD Map Export (always runs, cheap) ---

@@ -38,6 +38,13 @@ mapping:
   intensity_threshold: 0.40    # 车道线反射率阈值 (KITTI reflectance in [0,1])
   dbscan_eps: 0.7              # DBSCAN 聚类半径 (m); 桥接车道虚线内部碎片
   dbscan_min_points: 40        # 最小核心邻域; 过滤道路反光噪点
+  curb_grid_size: 0.30         # 路缘检测 xy 网格边长 (m); 2× voxel_size 避免 snap 混叠
+  curb_z_min: -2.0             # 路缘 z 下界 (与 road_z_min 一致)
+  curb_z_max: -1.2             # 路缘 z 上界 (ground+0.5m, 捕获台阶上沿)
+  curb_height_min: 0.10        # 最小台阶高度 (m); 0.08 会踩 voxel=0.15 snap 噪声 (~0.03 σ)
+  curb_height_max: 0.25        # 最大台阶高度 (m); 更高归为墙/车/绿化带
+  curb_dbscan_eps: 0.5         # 比 lane 紧; curb 是物理连续线不需要桥接虚线
+  curb_dbscan_min_points: 40   # 和 lane 一致以维持 trim 助手行为可预期
 
 export:
   lat0: 49.0                       # 假 WGS84 原点 (KITTI Karlsruhe 附近); seq 00 无真实 GPS

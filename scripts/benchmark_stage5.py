@@ -85,6 +85,8 @@ def _collect_rows(all_summaries: list[dict]) -> list[tuple[str, list]]:
     rows.append(("stage5 points", _col("metrics.stage5.working_point_count")))
     rows.append(("road points", _col("metrics.stage5.road_point_count")))
     rows.append(("lane candidates", _col("metrics.stage5.lane_candidate_count")))
+    rows.append(("curb candidates", _col("metrics.stage5.curb_point_count")))
+    rows.append(("curb clusters", _col("metrics.stage5.curb_cluster_count")))
     rows.append(("cluster count", _col("metrics.stage5.count")))
     rows.append(("cluster p05", _col("metrics.stage5.p05")))
     rows.append(("cluster p50", _col("metrics.stage5.p50")))

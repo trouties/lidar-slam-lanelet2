@@ -40,6 +40,13 @@ def _base_config() -> dict:
             "intensity_threshold": 0.40,
             "dbscan_eps": 0.7,
             "dbscan_min_points": 40,
+            "curb_grid_size": 0.30,
+            "curb_z_min": -2.0,
+            "curb_z_max": -1.2,
+            "curb_height_min": 0.10,
+            "curb_height_max": 0.25,
+            "curb_dbscan_eps": 0.5,
+            "curb_dbscan_min_points": 40,
         },
     }
 
@@ -166,11 +173,60 @@ def test_roundtrip_stage5_cache(tmp_path):
 
     loaded = cache.load_stage5(cfg)
     assert loaded is not None
-    loaded_pcd, loaded_clusters = loaded
+    loaded_pcd, loaded_clusters, loaded_curbs = loaded
     assert len(loaded_pcd.points) == len(pcd.points)
     assert len(loaded_clusters) == 2
     np.testing.assert_allclose(loaded_clusters[0], clusters[0])
     np.testing.assert_allclose(loaded_clusters[1], clusters[1])
+    # Curb clusters default to an empty list when not supplied on save.
+    assert loaded_curbs == []
+
+
+def test_stage5_cache_roundtrips_curbs(tmp_path):
+    """Curb clusters passed to save_stage5 should round-trip through the cache."""
+    cfg = _base_config()
+    cache = LayeredCache(tmp_path, sequence="00")
+
+    dummy = np.stack([np.eye(4) for _ in range(3)]).astype(np.float64)
+    cache.save_odometry(dummy, np.arange(3, dtype=np.float64), cfg)
+    cache.save_optimized(dummy, cfg)
+    cache.save_fused(dummy, cfg)
+    cache.save_global_map_master(_make_pcd(), cfg)
+
+    pcd = _make_pcd(n=100, seed=2)
+    clusters = [np.array([[0.0, 0.0, -1.7], [1.0, 0.0, -1.7]])]
+    curb_clusters = [
+        np.array([[3.0, 1.0, -1.6], [3.3, 1.0, -1.6], [3.6, 1.0, -1.6]]),
+        np.array([[-2.0, -1.0, -1.58]]),
+    ]
+    cache.save_stage5(
+        pcd, clusters, cfg, curb_clusters=curb_clusters, metrics={"curb_cluster_count": 2}
+    )
+
+    loaded = cache.load_stage5(cfg)
+    assert loaded is not None
+    _, _, loaded_curbs = loaded
+    assert len(loaded_curbs) == 2
+    np.testing.assert_allclose(loaded_curbs[0], curb_clusters[0])
+    np.testing.assert_allclose(loaded_curbs[1], curb_clusters[1])
+
+
+def test_stage5_cache_invalidates_on_curb_param_change(tmp_path):
+    """Changing a curb_* key under mapping: must invalidate stage5 cache."""
+    cfg = _base_config()
+    cache = LayeredCache(tmp_path, sequence="00")
+
+    dummy = np.stack([np.eye(4) for _ in range(3)]).astype(np.float64)
+    cache.save_odometry(dummy, np.arange(3, dtype=np.float64), cfg)
+    cache.save_optimized(dummy, cfg)
+    cache.save_fused(dummy, cfg)
+    cache.save_global_map_master(_make_pcd(), cfg)
+    cache.save_stage5(_make_pcd(), [np.array([[0.0, 0.0, 0.0]])], cfg)
+
+    assert cache.load_stage5(cfg) is not None
+
+    cfg["mapping"]["curb_grid_size"] = 0.5
+    assert cache.load_stage5(cfg) is None
 
 
 # ---------------------------------------------------------------------------

@@ -59,6 +59,101 @@ def extract_lane_markings(
     return road_points[mask]
 
 
+def extract_curbs(
+    points: np.ndarray,
+    grid_size: float = 0.30,
+    z_min: float = -2.0,
+    z_max: float = -1.2,
+    height_min: float = 0.10,
+    height_max: float = 0.25,
+    top_band: float = 0.03,
+) -> np.ndarray:
+    """Detect curb-top points via xy-grid height-step filtering.
+
+    Returns points that sit on the *upper* edge of a short vertical step
+    in the road-adjacent z band — i.e. curb tops, which form the
+    continuous line along a road boundary that DBSCAN can then cluster.
+
+    The project spec describes this feature as "法向量 + 曲率：路缘检测
+    （曲率突变 = 路面边界）". On a voxelized ground map (working voxel
+    0.15 m) the signal of interest reduces to a z discontinuity between
+    adjacent xy cells, so this implementation uses a pure-numpy 2D grid
+    instead of Open3D normal estimation. See ``refs/pipeline-notes.md``
+    (Stage 5 MapBuilder memory discipline) — running ``estimate_normals``
+    on a 30M-point working map is not memory-safe; this function only
+    allocates ``O(N)`` int64 keys plus ``O(C)`` per-cell arrays
+    (``C`` = unique xy cells ``<< N``).
+
+    Args:
+        points: ``(N, 3)`` XYZ in world (Velodyne) frame.
+        grid_size: xy bin edge length (m). Default 0.30 is 2× the working
+            voxel to avoid snap aliasing.
+        z_min: Lower bound on the z pre-filter (m). Defaults to the same
+            value as ``road_z_min`` so the curb search band aligns with
+            the road-surface band.
+        z_max: Upper bound on the z pre-filter (m). Extends above the
+            road-surface band to include curb tops.
+        height_min: Minimum per-cell ``zmax - zmin`` to count as a curb
+            step. Default 0.10 stays clear of ~0.03 m residual z noise
+            from 0.15 m voxel snap.
+        height_max: Maximum per-cell ``zmax - zmin`` — larger jumps get
+            rejected as walls / vehicles / vegetation.
+        top_band: Keep points within this distance (m) of the cell ``zmax``.
+            Default 0.03 m captures the top ~3 cm slab of the step.
+
+    Returns:
+        ``(M, 3)`` array of curb-top candidate points. ``M`` may be 0.
+    """
+    if points.shape[0] == 0:
+        return points.copy()
+
+    # Stage 1: prune to the z window — most of the working map is above
+    # this band (buildings, foliage) and is irrelevant for curbs.
+    z_mask = (points[:, 2] >= z_min) & (points[:, 2] <= z_max)
+    if not np.any(z_mask):
+        return np.zeros((0, 3), dtype=points.dtype)
+    band = points[z_mask]
+
+    # Stage 2: pack (x, y) cell index into a single int64 key using the
+    # same bias+shift trick as ``_voxel_aggregate`` in map_builder.py.
+    # ±2^20 cells per axis is far beyond any KITTI sequence footprint.
+    bias = 1 << 20
+    inv_grid = 1.0 / grid_size
+
+    keys = np.floor(band[:, 0] * inv_grid).astype(np.int64)
+    keys += bias
+    keys <<= 21
+
+    tmp = np.floor(band[:, 1] * inv_grid).astype(np.int64)
+    tmp += bias
+    keys |= tmp
+    del tmp
+
+    unique_keys, inverse = np.unique(keys, return_inverse=True)
+    del keys
+    n_cells = unique_keys.shape[0]
+    del unique_keys
+
+    # Stage 3: per-cell zmin / zmax via unbuffered ufunc.at. These are
+    # ~10× slower than bincount but are the idiomatic numpy way to get
+    # per-bin extrema; ~3-5 s on 30M points is acceptable.
+    zmin = np.full(n_cells, np.inf, dtype=np.float64)
+    zmax = np.full(n_cells, -np.inf, dtype=np.float64)
+    np.minimum.at(zmin, inverse, band[:, 2])
+    np.maximum.at(zmax, inverse, band[:, 2])
+
+    cell_range = zmax - zmin
+    cell_mask = (cell_range >= height_min) & (cell_range <= height_max)
+    if not np.any(cell_mask):
+        return np.zeros((0, 3), dtype=points.dtype)
+
+    # Stage 4: keep only points within ``top_band`` of their cell's zmax,
+    # restricted to cells that passed the height-step mask.
+    point_cell_zmax = zmax[inverse]
+    point_mask = cell_mask[inverse] & (band[:, 2] >= point_cell_zmax - top_band)
+    return band[point_mask]
+
+
 def _trim_cluster_minor_axis(cluster: np.ndarray, k: float = 2.5) -> np.ndarray:
     """Remove per-cluster outliers along the PCA minor axis using MAD.
 
