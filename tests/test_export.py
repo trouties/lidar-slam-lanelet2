@@ -9,6 +9,7 @@ import numpy as np
 
 from src.export.lanelet2_export import (
     classify_cluster,
+    classify_curb_cluster,
     cluster_to_polygon,
     cluster_to_polyline,
     export_lanelet2_osm,
@@ -140,14 +141,14 @@ def test_cluster_to_polygon_returns_four_corners():
 
 
 def test_export_lanelet2_osm_writes_valid_xml(tmp_path):
-    clusters = [
+    lane_clusters = [
         _thin_line(n=80, length=6.0, seed=10),
         _blob(n=300, side=5.0, seed=11),
         _thin_line(n=10, length=0.3, seed=12),  # too short -> noise
     ]
     out = tmp_path / "map_test.osm"
 
-    counts = export_lanelet2_osm(clusters, out)
+    counts = export_lanelet2_osm(lane_clusters, [], out)
 
     # File exists and parses.
     assert out.exists()
@@ -180,9 +181,126 @@ def test_export_lanelet2_osm_writes_valid_xml(tmp_path):
     assert nd_refs[0] == nd_refs[-1]
     assert any(t.get("k") == "area" and t.get("v") == "yes" for t in area_way.findall("tag"))
 
-    # Conservation invariant.
-    assert counts["total_input"] == 3
-    assert counts["line_thin"] + counts["line_thick"] + counts["area"] + counts["dropped"] == 3
-    assert counts["line_thin"] == 1
-    assert counts["area"] == 1
-    assert counts["dropped"] == 1
+    # Lane channel conservation invariant.
+    lane = counts["lane"]
+    assert lane["total_input"] == 3
+    assert lane["line_thin"] + lane["line_thick"] + lane["area"] + lane["dropped"] == 3
+    assert lane["line_thin"] == 1
+    assert lane["area"] == 1
+    assert lane["dropped"] == 1
+
+    # Curb channel: empty input -> all zeros.
+    curb = counts["curb"]
+    assert curb == {"kept": 0, "dropped": 0, "total_input": 0}
+
+
+# ---------------------------------------------------------------------------
+# Curb classification (single label, separate from lane)
+# ---------------------------------------------------------------------------
+
+
+def _curb_line(
+    n: int = 80,
+    length: float = 4.0,
+    sigma_y: float = 0.10,
+    seed: int = 20,
+) -> np.ndarray:
+    """Synthetic curbstone-shape cluster: long, thin, near-linear.
+
+    Defaults are tuned to match Stage 5 v4 'good' rate definition:
+    length >= 1.5 m, thickness <= 0.5 m, linearity >= 0.80. The z value
+    sits ~0.27m above the ground (matches v4 measured -1.46 mean).
+    """
+    rng = np.random.default_rng(seed)
+    x = np.linspace(0.0, length, n)
+    y = rng.normal(0.0, sigma_y, n)
+    z = np.full(n, -1.46)
+    return np.column_stack([x, y, z])
+
+
+def test_classify_curb_cluster_kept():
+    label, stats = classify_curb_cluster(_curb_line())
+    assert label == "curb"
+    assert stats["linearity"] >= 0.80
+    assert stats["length"] >= 1.5
+    assert stats["thickness"] <= 0.6
+
+
+def test_classify_curb_too_thick_dropped():
+    # 4m × 1m blob -- linear enough but exceeds curb max_thickness (0.6m).
+    label, _ = classify_curb_cluster(_curb_line(sigma_y=0.4, seed=21))
+    assert label == "noise"
+
+
+def test_classify_curb_too_short_dropped():
+    # 0.8m strip -- fails min_length (1.5m).
+    label, _ = classify_curb_cluster(_curb_line(length=0.8, seed=22))
+    assert label == "noise"
+
+
+def test_export_writes_curb_ways_without_polluting_lane(tmp_path):
+    lane_clusters = [
+        _thin_line(n=80, length=6.0, seed=30),
+        _blob(n=300, side=5.0, seed=31),
+        _thin_line(n=10, length=0.3, seed=32),  # noise
+    ]
+    curb_clusters = [
+        _curb_line(n=80, length=4.0, seed=40),
+        _curb_line(n=80, length=3.0, seed=41),
+        _curb_line(length=0.8, seed=42),  # too short -> noise
+    ]
+    out_with_curb = tmp_path / "map_with_curb.osm"
+    out_lane_only = tmp_path / "map_lane_only.osm"
+
+    counts_with = export_lanelet2_osm(lane_clusters, curb_clusters, out_with_curb)
+    counts_only = export_lanelet2_osm(lane_clusters, [], out_lane_only)
+
+    # Lane-channel non-pollution: identical lane clusters must yield identical
+    # lane counts regardless of whether curb_clusters are present.
+    assert counts_with["lane"] == counts_only["lane"]
+
+    # Curb conservation.
+    curb = counts_with["curb"]
+    assert curb["total_input"] == 3
+    assert curb["kept"] + curb["dropped"] == 3
+    assert curb["kept"] == 2
+    assert curb["dropped"] == 1
+
+    # OSM contains type=curb ways.
+    tree = ET.parse(out_with_curb)
+    root = tree.getroot()
+    way_types = Counter(
+        tag.get("v")
+        for w in root.findall("way")
+        for tag in w.findall("tag")
+        if tag.get("k") == "type"
+    )
+    assert way_types["curb"] == 2
+    # Lane ways still present and unchanged in count.
+    assert way_types["line_thin"] == 1
+    assert way_types["zebra_marking"] == 1
+
+    # Curb ways must carry subtype=solid (Lanelet2 LineString convention).
+    curb_ways = [
+        w
+        for w in root.findall("way")
+        if any(t.get("k") == "type" and t.get("v") == "curb" for t in w.findall("tag"))
+    ]
+    assert len(curb_ways) == 2
+    for w in curb_ways:
+        assert any(t.get("k") == "subtype" and t.get("v") == "solid" for t in w.findall("tag"))
+        # Curb way must NOT be flagged as area.
+        assert not any(t.get("k") == "area" for t in w.findall("tag"))
+
+
+def test_export_deterministic_ids(tmp_path):
+    lane_clusters = [_thin_line(n=80, length=6.0, seed=50)]
+    curb_clusters = [_curb_line(n=80, length=4.0, seed=51)]
+    out_a = tmp_path / "a.osm"
+    out_b = tmp_path / "b.osm"
+
+    export_lanelet2_osm(lane_clusters, curb_clusters, out_a)
+    export_lanelet2_osm(lane_clusters, curb_clusters, out_b)
+
+    # Same input should produce byte-identical OSM (deterministic IDs).
+    assert out_a.read_bytes() == out_b.read_bytes()

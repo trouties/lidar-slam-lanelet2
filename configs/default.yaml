@@ -55,11 +55,18 @@ mapping:
 export:
   lat0: 49.0                       # 假 WGS84 原点 (KITTI Karlsruhe 附近); seq 00 无真实 GPS
   lon0: 8.4
-  min_linearity: 0.75              # PCA xy linearity 阈值; line_* 类别下限
-  min_length: 1.0                  # m; 主轴跨度低于此则丢为 noise
-  line_thin_max_thickness: 0.8     # m; 匹配 dbscan_eps=0.7 + 余量; voxel=0.15 的自然 snap spread 让更紧阈值会误判
-  line_thick_max_thickness: 2.0    # m; 超过此值归为 area (人行横道/路口涂装)
-  polyline_bin_size: 0.5           # m; 把线状簇压成 polyline 的分箱宽度
+  polyline_bin_size: 0.5           # m; 线状簇分箱宽度 (lane/curb 共用)
+  lane:                            # 车道线分类阈值 (PCA 三档: thin/thick/area)
+    min_linearity: 0.75            # PCA xy linearity 下限
+    min_length: 1.0                # m; 主轴跨度低于此则丢为 noise
+    line_thin_max_thickness: 0.8   # m; 匹配 dbscan_eps=0.7 + voxel=0.15 自然 snap spread
+    line_thick_max_thickness: 2.0  # m; 超过此值归为 area (人行横道/路口涂装)
+  curb:                            # 路缘石分类阈值 (单一类别)
+                                   # 阈值依据 Stage 5 v4 实测 + stage6-curb-v1 benchmark 反馈
+                                   # v4 整体: median lin 0.91, median thk 0.46m, median len 1.4m
+    min_linearity: 0.75            # 与 lane 一致; "good" 0.80 过严, 长尾分布 lin 跨 0.85-0.97
+    min_length: 1.0                # m; v4 中位 1.4m, 1.5m 把一半 cluster 切掉; 1.0 是 polyline_bin 2x
+    max_thickness: 0.7             # m; "good" 上限 0.5 → 0.7; 吸收 v4 thickness 长尾 (max ~1.0m)
 
 cache:
   enabled: true

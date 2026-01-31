@@ -1,16 +1,27 @@
 """Lanelet2 HD Map export.
 
-Stage 6: Convert Stage 5 lane-marking clusters into a Lanelet2-compatible
-``.osm`` XML file.
+Stage 6: Convert Stage 5 lane-marking clusters and curb clusters into a
+Lanelet2-compatible ``.osm`` XML file.
 
-Pipeline: cluster -> PCA morphology classify -> polyline / oriented-bbox
-geometry -> OSM XML (nodes + ways).
+Pipeline (two independent channels, never merged):
+    lane cluster -> PCA morphology classify (thin/thick/area) -> polyline
+                    or oriented-bbox geometry -> OSM way (type=line_thin /
+                    line_thick / zebra_marking)
+    curb cluster -> curb-only classify (single label) -> polyline -> OSM
+                    way (type=curb)
 
 Scope note: This stage emits **LineStrings and Areas only** -- no Lanelet
 ``<relation>`` elements. Stage 5 provides no lane topology / no left-right
 pairing, so honest lanelet construction is not possible without inventing
 heuristics. Downstream loaders (``lanelet2.io.load``) will see entries in
 ``map.lineStringLayer``, not ``map.laneletLayer``.
+
+Channel isolation: lane and curb cluster lists are processed by separate
+classifiers and counted independently. The lane thin/thick/area thresholds
+must NOT be reused for curbs (curb physical width has only one class -- a
+curbstone line) and the two cluster lists must NOT be concatenated (would
+pollute lane PCA statistics with curb shape distribution). See
+``refs/pipeline-notes.md`` "下一轮 Stage 6 优化清单" for the binding rules.
 """
 
 from __future__ import annotations
@@ -121,6 +132,53 @@ def classify_cluster(
         return "area", stats
 
     return "noise", stats
+
+
+def classify_curb_cluster(
+    cluster: np.ndarray,
+    *,
+    min_linearity: float = 0.75,
+    min_length: float = 1.0,
+    max_thickness: float = 0.7,
+) -> tuple[str, dict]:
+    """Classify a Stage 5 curb cluster.
+
+    Curbs have a single physical class (curbstone line), so this returns
+    only ``"curb"`` or ``"noise"`` -- never thin/thick/area. Defaults are
+    derived from Stage 5 v4 measurements: median linearity 0.91, median
+    thickness 0.46m (see ``refs/pipeline-notes.md`` "Stage 5 curb 检测调
+    参"). The thresholds leave a safety margin above the v4 medians.
+
+    Args:
+        cluster: ``(N, 3)`` cluster point array (Velodyne meters).
+        min_linearity: PCA xy linearity floor; v4 median 0.91 leaves room.
+        min_length: Reject clusters whose principal-axis span is below
+            this. Matches the v4 "good" rate length floor (1.5 m).
+        max_thickness: Reject clusters whose minor-axis span exceeds this.
+            Matches the v4 "good" rate thickness ceiling, slightly relaxed
+            (0.5 → 0.6 m) to absorb the long tail above the median.
+
+    Returns:
+        Tuple ``(label, stats)`` where label is ``"curb"`` or ``"noise"``.
+    """
+    if cluster.shape[0] < 3:
+        return "noise", {"degenerate": True}
+
+    stats = _pca_stats(cluster[:, :2])
+    if stats.get("degenerate"):
+        stats["median_z"] = float(np.median(cluster[:, 2]))
+        return "noise", stats
+
+    stats["median_z"] = float(np.median(cluster[:, 2]))
+
+    if stats["length"] < min_length:
+        return "noise", stats
+    if stats["linearity"] < min_linearity:
+        return "noise", stats
+    if stats["thickness"] > max_thickness:
+        return "noise", stats
+
+    return "curb", stats
 
 
 def cluster_to_polyline(
@@ -322,61 +380,41 @@ def _build_osm_xml(features: list[dict], lat0: float, lon0: float) -> ET.Element
     return root
 
 
-def export_lanelet2_osm(
-    clusters: list[np.ndarray],
-    path: Path,
-    lat0: float = 49.0,
-    lon0: float = 8.4,
-    min_linearity: float = 0.75,
-    min_length: float = 1.0,
-    line_thin_max_thickness: float = 0.8,
-    line_thick_max_thickness: float = 2.0,
-    polyline_bin_size: float = 0.5,
-) -> dict:
-    """Classify Stage 5 clusters and write a Lanelet2-compatible OSM file.
+_DEFAULT_LANE_CFG = {
+    "min_linearity": 0.75,
+    "min_length": 1.0,
+    "line_thin_max_thickness": 0.8,
+    "line_thick_max_thickness": 2.0,
+}
 
-    Args:
-        clusters: List of ``(k_i, 3)`` cluster point arrays in Velodyne meters.
-        path: Output ``.osm`` file path.
-        lat0, lon0: Fake WGS84 origin for the equirectangular projection.
-            KITTI Odometry has no GPS; defaults pin to the Karlsruhe area.
-        min_linearity: PCA xy linearity threshold for ``line_*`` classes.
-        min_length: Minimum principal-axis span (m) for any non-noise label.
-        line_thin_max_thickness: Minor-axis cap (m) for ``line_thin``.
-        line_thick_max_thickness: Minor-axis cap (m) for ``line_thick``;
-            wider clusters become ``area``.
-        polyline_bin_size: Bin width (m) when reducing a line cluster
-            to an ordered polyline.
+_DEFAULT_CURB_CFG = {
+    "min_linearity": 0.75,
+    "min_length": 1.0,
+    "max_thickness": 0.7,
+}
 
-    Returns:
-        Counts dict with keys ``line_thin``, ``line_thick``, ``area``,
-        ``dropped``, ``total_input``. Conservation invariant:
-        ``line_thin + line_thick + area + dropped == total_input``.
 
-    Note:
-        Emits LineStrings and Areas only -- no Lanelet ``<relation>`` is
-        produced because Stage 5 provides no left/right pairing or topology.
-    """
+def _classify_lane_features(
+    lane_clusters: list[np.ndarray],
+    *,
+    cfg: dict,
+    polyline_bin_size: float,
+) -> tuple[list[dict], dict]:
+    """Lane channel: thin/thick/area morphology classification."""
     counts = {
         "line_thin": 0,
         "line_thick": 0,
         "area": 0,
         "dropped": 0,
-        "total_input": len(clusters),
+        "total_input": len(lane_clusters),
     }
     features: list[dict] = []
 
-    for cluster in clusters:
+    for cluster in lane_clusters:
         if cluster.shape[0] < 3:
             counts["dropped"] += 1
             continue
-        label, stats = classify_cluster(
-            cluster,
-            min_linearity=min_linearity,
-            min_length=min_length,
-            line_thin_max_thickness=line_thin_max_thickness,
-            line_thick_max_thickness=line_thick_max_thickness,
-        )
+        label, stats = classify_cluster(cluster, **cfg)
         if label == "noise":
             counts["dropped"] += 1
             continue
@@ -393,7 +431,102 @@ def export_lanelet2_osm(
             features.append({"kind": "area", "type": "zebra_marking", "vertices": polygon})
             counts["area"] += 1
 
-    root = _build_osm_xml(features, lat0=lat0, lon0=lon0)
+    return features, counts
+
+
+def _classify_curb_features(
+    curb_clusters: list[np.ndarray],
+    *,
+    cfg: dict,
+    polyline_bin_size: float,
+) -> tuple[list[dict], dict]:
+    """Curb channel: single-label classification, polyline geometry only."""
+    counts = {
+        "kept": 0,
+        "dropped": 0,
+        "total_input": len(curb_clusters),
+    }
+    features: list[dict] = []
+
+    for cluster in curb_clusters:
+        if cluster.shape[0] < 3:
+            counts["dropped"] += 1
+            continue
+        label, stats = classify_curb_cluster(cluster, **cfg)
+        if label == "noise":
+            counts["dropped"] += 1
+            continue
+        polyline = cluster_to_polyline(cluster, stats, bin_size=polyline_bin_size)
+        if polyline is None:
+            counts["dropped"] += 1
+            continue
+        features.append({"kind": "polyline", "type": "curb", "vertices": polyline})
+        counts["kept"] += 1
+
+    return features, counts
+
+
+def export_lanelet2_osm(
+    lane_clusters: list[np.ndarray],
+    curb_clusters: list[np.ndarray],
+    path: Path,
+    *,
+    lat0: float = 49.0,
+    lon0: float = 8.4,
+    polyline_bin_size: float = 0.5,
+    lane: dict | None = None,
+    curb: dict | None = None,
+) -> dict:
+    """Classify Stage 5 lane + curb clusters and write a Lanelet2 OSM file.
+
+    Two independent channels (lane and curb) are processed separately and
+    never merged. Their cluster lists, classifiers, OSM tags, and metric
+    counts are all kept distinct so threshold tuning on one channel cannot
+    pollute the other (see ``refs/pipeline-notes.md:259-271``).
+
+    Args:
+        lane_clusters: Stage 5 lane-marking clusters, ``(k_i, 3)`` each.
+        curb_clusters: Stage 5 curb clusters (v4), ``(k_i, 3)`` each.
+        path: Output ``.osm`` file path.
+        lat0, lon0: Fake WGS84 origin for the equirectangular projection.
+            KITTI Odometry has no GPS; defaults pin to the Karlsruhe area.
+        polyline_bin_size: Bin width (m) when reducing a linear cluster to
+            an ordered polyline. Shared by both channels.
+        lane: Lane classifier overrides. Recognized keys: ``min_linearity``,
+            ``min_length``, ``line_thin_max_thickness``,
+            ``line_thick_max_thickness``. Unset keys fall back to defaults.
+        curb: Curb classifier overrides. Recognized keys: ``min_linearity``,
+            ``min_length``, ``max_thickness``. Unset keys fall back to
+            defaults derived from Stage 5 v4 measurements.
+
+    Returns:
+        Nested counts dict::
+
+            {
+                "lane": {"line_thin", "line_thick", "area", "dropped", "total_input"},
+                "curb": {"kept", "dropped", "total_input"},
+            }
+
+        Each channel satisfies its own conservation invariant:
+        ``line_thin + line_thick + area + dropped == lane.total_input``;
+        ``kept + dropped == curb.total_input``.
+
+    Note:
+        Emits LineStrings (lane line_thin/line_thick + curb) and Areas
+        (lane zebra_marking) only -- no Lanelet ``<relation>`` is produced
+        because Stage 5 provides no left/right pairing or topology.
+    """
+    lane_cfg = {**_DEFAULT_LANE_CFG, **(lane or {})}
+    curb_cfg = {**_DEFAULT_CURB_CFG, **(curb or {})}
+
+    lane_features, lane_counts = _classify_lane_features(
+        lane_clusters, cfg=lane_cfg, polyline_bin_size=polyline_bin_size
+    )
+    curb_features, curb_counts = _classify_curb_features(
+        curb_clusters, cfg=curb_cfg, polyline_bin_size=polyline_bin_size
+    )
+
+    root = _build_osm_xml(lane_features + curb_features, lat0=lat0, lon0=lon0)
     raw = ET.tostring(root, encoding="utf-8")
     pretty = minidom.parseString(raw).toprettyxml(indent="  ", encoding="utf-8")
 
@@ -402,4 +535,4 @@ def export_lanelet2_osm(
     with open(path, "wb") as f:
         f.write(pretty)
 
-    return counts
+    return {"lane": lane_counts, "curb": curb_counts}

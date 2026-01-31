@@ -441,19 +441,22 @@ def run_pipeline_cached(
         print(f"=== [{sequence}] Stage 6: Lanelet2 HD Map Export ===")
     export_cfg = cfg.get("export", {})
     osm_path = output_dir / f"map_{sequence}.osm"
-    counts = export_lanelet2_osm(clusters, osm_path, **export_cfg)
+    counts = export_lanelet2_osm(clusters, curb_clusters, osm_path, **export_cfg)
+    lane_c = counts["lane"]
+    curb_c = counts["curb"]
     if verbose:
         print(
-            f"  Classified: thin={counts['line_thin']} thick={counts['line_thick']} "
-            f"area={counts['area']} dropped={counts['dropped']} "
-            f"(of {counts['total_input']})"
+            f"  Lane: thin={lane_c['line_thin']} thick={lane_c['line_thick']} "
+            f"area={lane_c['area']} dropped={lane_c['dropped']} "
+            f"(of {lane_c['total_input']})"
+        )
+        print(
+            f"  Curb: kept={curb_c['kept']} dropped={curb_c['dropped']} "
+            f"(of {curb_c['total_input']})"
         )
     summary["metrics"]["stage6"] = {
-        "line_thin": int(counts["line_thin"]),
-        "line_thick": int(counts["line_thick"]),
-        "area": int(counts["area"]),
-        "dropped": int(counts["dropped"]),
-        "total_input": int(counts["total_input"]),
+        "lane": {k: int(v) for k, v in lane_c.items()},
+        "curb": {k: int(v) for k, v in curb_c.items()},
     }
 
     return summary
