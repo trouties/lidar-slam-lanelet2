@@ -1,0 +1,36 @@
+common:
+    lid_topic: "/velodyne_points"
+    imu_topic: "/imu/data"
+    time_sync_en: false
+    time_offset_lidar_to_imu: 0.0
+
+preprocess:
+    lidar_type: 2                  # 2 = Velodyne
+    scan_line: 64                  # HDL-64E
+    blind: 2.0                    # min range (m)
+    point_filter_num: 4           # downsample: keep every 4th point
+    feature_extract_enable: false
+    scan_rate: 10                 # 10 Hz
+
+mapping:
+    acc_cov: 0.1
+    gyr_cov: 0.1
+    b_acc_cov: 0.0001
+    b_gyr_cov: 0.0001
+    fov_degree: 180
+    det_range: 100.0
+    extrinsic_est_en: false
+    # LiDAR-to-IMU extrinsic (approx identity for KITTI; refined from calib)
+    extrinsic_T: [0.0, 0.0, 0.0]
+    extrinsic_R: [1.0, 0.0, 0.0,
+                  0.0, 1.0, 0.0,
+                  0.0, 0.0, 1.0]
+
+publish:
+    path_en: true
+    scan_publish_en: true
+    dense_publish_en: false
+    scan_bodyframe_pub_en: false
+
+pcd_save:
+    pcd_save_en: false

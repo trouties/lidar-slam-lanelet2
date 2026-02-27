@@ -10,3 +10,7 @@ refs/
 results/
 /cache/
 /logs/
+external/baselines/*/build/
+external/baselines/*/devel/
+external/baselines/*/results/*.txt
+/tmp/baseline_*.log

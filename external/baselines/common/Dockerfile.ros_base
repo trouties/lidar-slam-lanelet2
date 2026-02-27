@@ -1,0 +1,25 @@
+FROM ros:noetic-ros-base-focal
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV ROS_DISTRO=noetic
+
+# Common build tools + PCL + Eigen (shared by all three SLAM systems)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential cmake git wget \
+    ros-noetic-pcl-ros \
+    ros-noetic-tf2-ros \
+    ros-noetic-tf2-geometry-msgs \
+    ros-noetic-sensor-msgs \
+    ros-noetic-nav-msgs \
+    ros-noetic-geometry-msgs \
+    python3-pip python3-rosbag python3-sensor-msgs python3-rospy \
+    libeigen3-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Python tools for KITTI conversion and pose extraction
+RUN pip3 install --no-cache-dir numpy scipy
+
+WORKDIR /catkin_ws
+RUN mkdir -p src
+
+SHELL ["/bin/bash", "-c"]
