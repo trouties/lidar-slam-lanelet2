@@ -15,9 +15,18 @@ gtsam:
   gps_sigmas: [0.5, 0.5, 1.0]  # x, y, z
 
 loop_closure:
+  mode: v2                       # v1=distance, v2=scan_context, both=combined
   distance_threshold: 15.0
   min_frame_gap: 100
   icp_fitness_threshold: 0.9
+  scan_context:
+    num_rings: 20
+    num_sectors: 60
+    max_range: 80.0
+    distance_threshold: 0.4      # SC cosine distance threshold; ICP@0.9 is real quality gate
+    top_k: 25                    # ring-key candidates to re-rank per query
+    query_stride: 1              # query every N-th frame (1 = every frame for max recall)
+    max_matches_per_query: 5     # cap per-frame matches to control ICP cost; 0 = unlimited
 
 ekf:
   process_noise_pos: 0.1

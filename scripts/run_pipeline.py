@@ -240,6 +240,8 @@ def run_pipeline_cached(
             sc_max_range=sc_cfg.get("max_range", 80.0),
             sc_distance_threshold=sc_cfg.get("distance_threshold", 0.4),
             sc_top_k=sc_cfg.get("top_k", 10),
+            sc_query_stride=sc_cfg.get("query_stride", 1),
+            sc_max_matches_per_query=sc_cfg.get("max_matches_per_query", 0),
         )
         timer_s3 = StageTimer("stage3_optimization")
         with timer_s3:
