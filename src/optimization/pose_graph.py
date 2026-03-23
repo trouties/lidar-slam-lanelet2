@@ -48,21 +48,44 @@ class PoseGraphOptimizer:
         self.initial_values = gtsam.Values()
         self.n_poses = 0
 
-    def build_graph(self, poses: list[np.ndarray]) -> None:
+    def build_graph(
+        self,
+        poses: list[np.ndarray],
+        prior_indices: list[int] | None = None,
+        gt_poses: list[np.ndarray] | None = None,
+    ) -> None:
         """Build pose graph from sequential odometry poses.
 
-        Adds a prior on pose 0 and BetweenFactorPose3 for each
-        consecutive pair (i, i+1).
+        Adds priors and BetweenFactorPose3 for each consecutive pair.
 
         Args:
             poses: List of 4x4 SE(3) pose matrices from odometry.
+            prior_indices: Frame indices that receive an absolute prior.
+                If ``None``, only frame 0 gets a prior (v3 default).
+                Use :func:`src.benchmarks.gnss_denial.make_prior_indices`
+                to generate indices for GNSS-denial experiments.
+            gt_poses: Ground-truth poses used as prior values when
+                *prior_indices* is given.  Falls back to estimated *poses*
+                if ``None``.
         """
         self.graph = gtsam.NonlinearFactorGraph()
         self.initial_values = gtsam.Values()
         self.n_poses = len(poses)
 
-        # Prior on first pose
-        self.graph.add(gtsam.PriorFactorPose3(0, gtsam.Pose3(poses[0]), self.prior_noise))
+        # Determine which frames get absolute priors
+        if prior_indices is None:
+            prior_set = {0}
+        else:
+            prior_set = set(prior_indices)
+            prior_set.add(0)  # frame 0 always anchored
+
+        prior_source = gt_poses if gt_poses is not None else poses
+
+        for idx in sorted(prior_set):
+            if 0 <= idx < len(poses):
+                self.graph.add(
+                    gtsam.PriorFactorPose3(idx, gtsam.Pose3(prior_source[idx]), self.prior_noise)
+                )
 
         # Insert initial values and between factors
         for i, pose in enumerate(poses):

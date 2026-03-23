@@ -1,0 +1,5 @@
+sequence,mode,scenario,ape_rmse,ape_mean
+00,loose,normal,11.5345,10.1905
+00,tight,normal,9.2166,8.2799
+00,loose,gnss_denied,0.5354,0.4647
+00,tight,gnss_denied,0.5343,0.4523
