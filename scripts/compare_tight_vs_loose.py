@@ -60,15 +60,17 @@ def _run_loose(config, seq, dataset, poses, gt_velo, timestamps, prior_indices=N
         measurement_noise_pos=ekf_cfg.get("measurement_noise_pos", 0.05),
         measurement_noise_rot=ekf_cfg.get("measurement_noise_rot", 0.01),
     )
-    fused = eskf.run(opt_poses, timestamps[:len(opt_poses)])
+    fused = eskf.run(opt_poses, timestamps[: len(opt_poses)])
     return fused
 
 
-def _run_tight(config, seq, dataset, poses, gt_velo, lidar_ts, imu_acc, imu_gyro,
-               imu_ts, prior_indices=None):
+def _run_tight(
+    config, seq, dataset, poses, gt_velo, lidar_ts, imu_acc, imu_gyro, imu_ts, prior_indices=None
+):
     """Run tight coupling: pose graph + GTSAM IMU preintegration + loop closure."""
     gtsam_cfg = config.get("gtsam", {})
     lc_cfg = config.get("loop_closure", {})
+    imu_cfg = config.get("imu", {})
 
     # Detect loop closures (same as loose path)
     detector = LoopClosureDetector(
@@ -87,9 +89,14 @@ def _run_tight(config, seq, dataset, poses, gt_velo, lidar_ts, imu_acc, imu_gyro
         lidar_timestamps=lidar_ts,
         odom_sigmas=gtsam_cfg.get("odom_sigmas"),
         prior_sigmas=gtsam_cfg.get("prior_sigmas"),
+        loop_closure_sigmas=gtsam_cfg.get("loop_closure_sigmas"),
         prior_indices=prior_indices,
         gt_poses=gt_velo,
         loop_closures=closures,
+        accel_noise_sigma=imu_cfg.get("accel_noise_sigma", 5.0),
+        gyro_noise_sigma=imu_cfg.get("gyro_noise_sigma", 0.5),
+        accel_bias_sigma=imu_cfg.get("accel_bias_sigma", 0.1),
+        gyro_bias_sigma=imu_cfg.get("gyro_bias_sigma", 0.01),
     )
     return opt_poses, bias_history
 
@@ -109,18 +116,23 @@ def main():
     ape_rows = []
 
     for seq in sequences:
-        print(f"\n{'='*60}")
+        print(f"\n{'=' * 60}")
         print(f"Sequence {seq}")
-        print(f"{'='*60}")
+        print(f"{'=' * 60}")
 
         # Check IMU availability
         imu_result = load_imu_for_odometry_seq(seq, raw_root=args.raw_root)
         if imu_result is None:
             print(f"  No IMU data for seq {seq} — skipping")
-            ape_rows.append({
-                "sequence": seq, "mode": "tight", "scenario": "normal",
-                "ape_rmse": "FAIL:NO_IMU", "ape_mean": "FAIL:NO_IMU",
-            })
+            ape_rows.append(
+                {
+                    "sequence": seq,
+                    "mode": "tight",
+                    "scenario": "normal",
+                    "ape_rmse": "FAIL:NO_IMU",
+                    "ape_mean": "FAIL:NO_IMU",
+                }
+            )
             continue
 
         imu_acc, imu_gyro, imu_ts = imu_result
@@ -132,14 +144,10 @@ def main():
         Tr_inv = np.linalg.inv(Tr)
         gt_cam = dataset.poses
         gt_velo = (
-            [Tr_inv @ gt_cam[i] @ Tr for i in range(len(gt_cam))]
-            if gt_cam is not None
-            else None
+            [Tr_inv @ gt_cam[i] @ Tr for i in range(len(gt_cam))] if gt_cam is not None else None
         )
         lidar_ts = (
-            dataset.timestamps
-            if dataset.timestamps is not None
-            else np.arange(len(dataset)) * 0.1
+            dataset.timestamps if dataset.timestamps is not None else np.arange(len(dataset)) * 0.1
         )
 
         # Get cached LiDAR odometry
@@ -161,9 +169,13 @@ def main():
             )
             poses = odom.run(dataset)
 
-        # Align IMU timestamps to LiDAR timestamps
-        # KITTI Odometry timestamps start at 0; IMU timestamps may have different base
-        # Assume both start at frame 0
+        # Align IMU timestamps to LiDAR timestamps.
+        # KITTI Odometry times.txt is relative to sequence start (t[0] = 0).
+        # KITTI Raw oxts timestamps are also zeroed to drive start in imu_loader.py.
+        # This alignment assumption holds for Seq 00 (drive_0027) and Seq 05 (drive_0018)
+        # where the Odometry subsequence starts at the same frame as the Raw drive.
+        # For sequences with a non-zero frame offset (e.g. Seq 08 = drive_0028 mid-segment),
+        # a frame-offset correction would be needed before clipping.
         n_frames = min(len(poses), len(lidar_ts))
         poses = poses[:n_frames]
         lidar_ts_arr = np.asarray(lidar_ts[:n_frames], dtype=np.float64)
@@ -189,35 +201,52 @@ def main():
             n_eval = min(len(loose_poses), len(gt_velo))
             loose_metrics = evaluate_odometry(loose_poses[:n_eval], gt_velo[:n_eval])
             print(f"  Loose APE: {loose_metrics['ape']['rmse']:.4f} m (RMSE)")
-            ape_rows.append({
-                "sequence": seq, "mode": "loose", "scenario": "normal",
-                "ape_rmse": f"{loose_metrics['ape']['rmse']:.4f}",
-                "ape_mean": f"{loose_metrics['ape']['mean']:.4f}",
-            })
+            ape_rows.append(
+                {
+                    "sequence": seq,
+                    "mode": "loose",
+                    "scenario": "normal",
+                    "ape_rmse": f"{loose_metrics['ape']['rmse']:.4f}",
+                    "ape_mean": f"{loose_metrics['ape']['mean']:.4f}",
+                }
+            )
 
         # Tight
         print("  Running tight coupling...")
         tight_poses, bias_hist = _run_tight(
-            config, seq, dataset, poses, gt_velo, lidar_ts_arr,
-            imu_acc_clip, imu_gyro_clip, imu_ts_clip,
+            config,
+            seq,
+            dataset,
+            poses,
+            gt_velo,
+            lidar_ts_arr,
+            imu_acc_clip,
+            imu_gyro_clip,
+            imu_ts_clip,
         )
         if gt_velo is not None:
             n_eval = min(len(tight_poses), len(gt_velo))
             tight_metrics = evaluate_odometry(tight_poses[:n_eval], gt_velo[:n_eval])
             print(f"  Tight APE: {tight_metrics['ape']['rmse']:.4f} m (RMSE)")
-            ape_rows.append({
-                "sequence": seq, "mode": "tight", "scenario": "normal",
-                "ape_rmse": f"{tight_metrics['ape']['rmse']:.4f}",
-                "ape_mean": f"{tight_metrics['ape']['mean']:.4f}",
-            })
+            ape_rows.append(
+                {
+                    "sequence": seq,
+                    "mode": "tight",
+                    "scenario": "normal",
+                    "ape_rmse": f"{tight_metrics['ape']['rmse']:.4f}",
+                    "ape_mean": f"{tight_metrics['ape']['mean']:.4f}",
+                }
+            )
 
         # Save bias
         bias_arr = np.array(bias_hist)
         bias_path = OUT_DIR / f"bias_{seq}.csv"
         np.savetxt(
-            bias_path, bias_arr,
+            bias_path,
+            bias_arr,
             header="ax_bias,ay_bias,az_bias,wx_bias,wy_bias,wz_bias",
-            delimiter=",", comments="",
+            delimiter=",",
+            comments="",
         )
         print(f"  Bias saved to {bias_path}")
 
@@ -242,31 +271,47 @@ def main():
         print(f"  Denial window: frames {start}-{end}, distance {denial_dist:.1f}m")
 
         # Loose denied
-        loose_denied = _run_loose(config, seq, dataset, poses, gt_velo, lidar_ts_arr,
-                                   prior_indices=prior_indices)
+        loose_denied = _run_loose(
+            config, seq, dataset, poses, gt_velo, lidar_ts_arr, prior_indices=prior_indices
+        )
         if gt_velo is not None:
             drift_loose = score_denial_drift(loose_denied, gt_velo, start, end)
             print(f"  Loose denied APE: {drift_loose['ape_mean']:.4f} m")
-            ape_rows.append({
-                "sequence": seq, "mode": "loose", "scenario": "gnss_denied",
-                "ape_rmse": f"{drift_loose['ape_rmse']:.4f}",
-                "ape_mean": f"{drift_loose['ape_mean']:.4f}",
-            })
+            ape_rows.append(
+                {
+                    "sequence": seq,
+                    "mode": "loose",
+                    "scenario": "gnss_denied",
+                    "ape_rmse": f"{drift_loose['ape_rmse']:.4f}",
+                    "ape_mean": f"{drift_loose['ape_mean']:.4f}",
+                }
+            )
 
         # Tight denied
         tight_denied, _ = _run_tight(
-            config, seq, dataset, poses, gt_velo, lidar_ts_arr,
-            imu_acc_clip, imu_gyro_clip, imu_ts_clip,
+            config,
+            seq,
+            dataset,
+            poses,
+            gt_velo,
+            lidar_ts_arr,
+            imu_acc_clip,
+            imu_gyro_clip,
+            imu_ts_clip,
             prior_indices=prior_indices,
         )
         if gt_velo is not None:
             drift_tight = score_denial_drift(tight_denied, gt_velo, start, end)
             print(f"  Tight denied APE: {drift_tight['ape_mean']:.4f} m")
-            ape_rows.append({
-                "sequence": seq, "mode": "tight", "scenario": "gnss_denied",
-                "ape_rmse": f"{drift_tight['ape_rmse']:.4f}",
-                "ape_mean": f"{drift_tight['ape_mean']:.4f}",
-            })
+            ape_rows.append(
+                {
+                    "sequence": seq,
+                    "mode": "tight",
+                    "scenario": "gnss_denied",
+                    "ape_rmse": f"{drift_tight['ape_rmse']:.4f}",
+                    "ape_mean": f"{drift_tight['ape_mean']:.4f}",
+                }
+            )
 
     # Write APE comparison
     if ape_rows:

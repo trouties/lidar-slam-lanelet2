@@ -85,8 +85,10 @@ class ImuPreintegrator:
     ) -> gtsam.ImuFactor:
         """Create a GTSAM ImuFactor from the accumulated measurements."""
         return gtsam.ImuFactor(
-            pose_key_i, vel_key_i,
-            pose_key_j, vel_key_j,
+            pose_key_i,
+            vel_key_i,
+            pose_key_j,
+            vel_key_j,
             bias_key,
             self._pim,
         )
@@ -100,6 +102,7 @@ def build_tight_coupled_graph(
     lidar_timestamps: np.ndarray,
     odom_sigmas: list[float] | None = None,
     prior_sigmas: list[float] | None = None,
+    loop_closure_sigmas: list[float] | None = None,
     prior_indices: list[int] | None = None,
     gt_poses: list[np.ndarray] | None = None,
     loop_closures: list[tuple[int, int, np.ndarray]] | None = None,
@@ -120,6 +123,9 @@ def build_tight_coupled_graph(
         lidar_timestamps: ``(N,)`` LiDAR frame timestamps in seconds.
         odom_sigmas: LiDAR odometry noise sigmas [tx,ty,tz,rx,ry,rz].
         prior_sigmas: Prior noise sigmas [tx,ty,tz,rx,ry,rz].
+        loop_closure_sigmas: Loop closure noise sigmas [tx,ty,tz,rx,ry,rz].
+            ICP-verified closures are typically tighter than odometry.
+            Falls back to odom_sigmas when None.
         prior_indices: Frame indices for absolute priors (GNSS denial).
         gt_poses: Ground-truth poses for priors.
         accel_noise_sigma: Accelerometer noise σ (m/s²).
@@ -137,12 +143,10 @@ def build_tight_coupled_graph(
         prior_sigmas = [0.01, 0.01, 0.01, 0.001, 0.001, 0.001]
 
     # GTSAM sigma reorder: config [tx,ty,tz,rx,ry,rz] → [rx,ry,rz,tx,ty,tz]
-    odom_noise = gtsam.noiseModel.Diagonal.Sigmas(
-        np.array([*odom_sigmas[3:], *odom_sigmas[:3]])
-    )
-    prior_noise = gtsam.noiseModel.Diagonal.Sigmas(
-        np.array([*prior_sigmas[3:], *prior_sigmas[:3]])
-    )
+    odom_noise = gtsam.noiseModel.Diagonal.Sigmas(np.array([*odom_sigmas[3:], *odom_sigmas[:3]]))
+    prior_noise = gtsam.noiseModel.Diagonal.Sigmas(np.array([*prior_sigmas[3:], *prior_sigmas[:3]]))
+    _lc_sigmas = loop_closure_sigmas if loop_closure_sigmas is not None else odom_sigmas
+    lc_noise = gtsam.noiseModel.Diagonal.Sigmas(np.array([*_lc_sigmas[3:], *_lc_sigmas[:3]]))
 
     # Key scheme: pose=P(i), velocity=V(i), bias=B(i)
     def P(i):
@@ -252,11 +256,7 @@ def build_tight_coupled_graph(
     # Add loop closure factors
     if loop_closures:
         for lc_i, lc_j, rel_pose in loop_closures:
-            graph.add(
-                gtsam.BetweenFactorPose3(
-                    P(lc_i), P(lc_j), gtsam.Pose3(rel_pose), odom_noise
-                )
-            )
+            graph.add(gtsam.BetweenFactorPose3(P(lc_i), P(lc_j), gtsam.Pose3(rel_pose), lc_noise))
 
     # Optimize
     params = gtsam.LevenbergMarquardtParams()

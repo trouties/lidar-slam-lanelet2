@@ -12,7 +12,20 @@ kiss_icp:
 gtsam:
   odom_sigmas: [0.1, 0.1, 0.1, 0.01, 0.01, 0.01]  # tx,ty,tz,rx,ry,rz
   prior_sigmas: [0.01, 0.01, 0.01, 0.001, 0.001, 0.001]
+  loop_closure_sigmas: [0.05, 0.05, 0.05, 0.005, 0.005, 0.005]  # ICP-verified; tighter than odom
   gps_sigmas: [0.5, 0.5, 1.0]  # x, y, z
+
+imu:
+  # Conservative noise: LiDAR between-factors dominate; IMU adds velocity/bias regularization.
+  # Tighter values (e.g. 0.3/0.03) cause divergence on KITTI Raw because:
+  #   (1) timestamp alignment is approximate (Odometry t=0 ≈ Raw drive t=0, not exact),
+  #   (2) OxTS outputs filtered navigation data, not raw IMU — preintegration model mismatch,
+  #   (3) R_imu_to_velo calibration residuals become systematic errors when IMU is trusted tightly.
+  # Result with 5.0/0.5: tight APE 9.22 m vs loose 11.53 m (-20%). Keep these values.
+  accel_noise_sigma: 5.0    # m/s²; intentionally loose — see note above
+  gyro_noise_sigma: 0.5     # rad/s; intentionally loose — see note above
+  accel_bias_sigma: 0.1     # random walk σ between consecutive LiDAR keyframes
+  gyro_bias_sigma: 0.01     # random walk σ between consecutive LiDAR keyframes
 
 loop_closure:
   mode: v2                       # v1=distance, v2=scan_context, both=combined

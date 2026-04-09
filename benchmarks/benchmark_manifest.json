@@ -134,5 +134,21 @@
       "top1_pct": 59.04853789261206,
       "total_s": 50.5811
     }
+  },
+  {
+    "run_id": "6f68bf4b326e",
+    "task": "SUP-04",
+    "git_sha": "8a90c76b69afdbcdca03574b7c41d6b933f1d424",
+    "config_hash": "fcb61824225c5a5a",
+    "timestamp": "2026-04-11T18:03:46.327962+00:00",
+    "sequences": [
+      "00"
+    ],
+    "artifacts": [
+      "benchmarks/tight_vs_loose/ape_compare.csv"
+    ],
+    "metrics": {
+      "n_rows": 4
+    }
   }
 ]

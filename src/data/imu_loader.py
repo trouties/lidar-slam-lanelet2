@@ -162,9 +162,8 @@ def load_imu_for_odometry_seq(
 
     # Ensure monotonic timestamps (drop non-monotonic samples)
     mono_mask = np.ones(len(timestamps), dtype=bool)
-    for i in range(1, len(timestamps)):
-        if timestamps[i] <= timestamps[i - 1]:
-            mono_mask[i] = False
+    if len(timestamps) > 1:
+        mono_mask[1:] = np.diff(timestamps) > 0
     if not mono_mask.all():
         acc = acc[mono_mask]
         gyro = gyro[mono_mask]
