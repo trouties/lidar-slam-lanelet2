@@ -13,32 +13,25 @@
 
 ## Pipeline Architecture
 
-```mermaid
-graph LR
-    subgraph S1["Stage 1: Data Ingestion"]
-        A["KITTIDataset\nNuScenesDataset"]
-    end
-    subgraph S2["Stage 2: LiDAR Odometry"]
-        B["KISS-ICP\nadaptive threshold ICP"]
-    end
-    subgraph S3["Stage 3: Graph Optimization"]
-        C["GTSAM Pose Graph\n+ Scan Context v2\n+ IMU Preintegration"]
-    end
-    subgraph S4["Stage 4: Sensor Fusion"]
-        D["Error-State KF\n+ GTSAM tight coupling"]
-    end
-    subgraph S5["Stage 5: Mapping"]
-        E["Voxel Map Builder\n+ Lane/Curb Extraction"]
-    end
-    subgraph S6["Stage 6: HD Map Export"]
-        F["Lanelet2 .osm\n+ GeoJSON features"]
-    end
-
-    A -->|"(N,4) float32\npoint clouds"| B
-    B -->|"SE(3) 4×4\nodometry poses"| C
-    C -->|"optimized\nSE(3) poses"| D
-    D -->|"fused poses\n+ point clouds"| E
-    E -->|"PCA-classified\nlane/curb clusters"| F
+```
+ Stage 1              Stage 2            Stage 3               Stage 4
+ Data Ingestion       LiDAR Odometry     Graph Optimization    Sensor Fusion
+┌──────────────┐    ┌───────────────┐   ┌──────────────────┐  ┌─────────────────┐
+│ KITTIDataset │    │   KISS-ICP    │   │  GTSAM Pose Graph│  │ Error-State KF  │
+│ NuScenesDset │───>│  adaptive ICP │──>│+ Scan Context v2 │─>│+ GTSAM tight    │
+│              │    │               │   │+ IMU Preintegr.  │  │  coupling       │
+└──────────────┘    └───────────────┘   └──────────────────┘  └────────┬────────┘
+  (N,4) point         SE(3) 4x4            optimized SE(3)            │
+  clouds              odometry poses       poses                      │
+                                                                      v
+                     Stage 6              Stage 5              fused poses
+                     HD Map Export        Mapping              + point clouds
+                    ┌───────────────┐   ┌──────────────────┐         │
+                    │ Lanelet2 .osm │<──│ Voxel Map Builder│<────────┘
+                    │ + GeoJSON     │   │+ Lane/Curb Extr. │
+                    └───────────────┘   └──────────────────┘
+                      regulatory HD       PCA-classified
+                      map output          lane/curb clusters
 ```
 
 ## Results
@@ -305,25 +298,9 @@ Converts classified feature clusters to Lanelet2 OSM format.
 
 ### Supplement Tasks
 
-| ID | Task | Priority | Status | Key Result |
-|----|------|----------|--------|------------|
-| SUP-01 | 4-system baseline comparison | P0 | Done | Ours 11.53 m vs next-best 77.41 m (Seq 00) |
-| SUP-02 | Scan Context v2 loop closure | P0 | Done | 2,635 closures, P=0.967, R=0.195 |
-| SUP-03 | Runtime profiling report | P0 | Done | Stage 3 bottleneck identified, 4.77× speedup |
-| SUP-04 | IMU preintegration tight coupling | P0 | Done | APE −20% (11.53 → 9.22 m) |
-| SUP-05 | nuScenes cross-dataset evaluation | P1 | Done | 10 scenes, all APE < 10 m |
-| SUP-06 | Uncertainty visualization | P1 | Planned | Covariance ellipsoids from pose graph marginals |
-| SUP-07 | Degeneracy detection | P1 | Planned | ICP Hessian condition number monitoring |
-| SUP-08 | ROS2 Humble node wrapping | P1 | Planned | Real-time /odom + TF + RViz2 |
-| SUP-09 | Docker Compose reproduction | P1 | Planned | `docker compose up` one-command demo |
-| SUP-10 | Failure modes documentation | P1 | Planned | ≥5 modes with visual evidence |
-| SUP-11 | OSM alignment evaluation | P1 | Planned | Hausdorff distance vs OSM road network |
-| SUP-12 | Lanelet2 routing graph + A* | P2 | Planned | Path query on HD Map topology |
-| SUP-13 | Fixed-lag smoother vs full batch | P2 | Planned | iSAM2 vs LM trade-off analysis |
-| SUP-14 | Interactive web demo (Kepler.gl) | P2 | Planned | GitHub Pages deployment |
-| SUP-15 | Technical writeup | P2 | Planned | 2,500–3,500 word engineering report |
-| SUP-16 | Demo video | P2 | Planned | ≤30 s trajectory replay animation |
-| SUP-17 | HD Map semantic layer | P2 | Planned | Heuristic stop line + crosswalk detection |
+**Completed:** 4-system baseline comparison (SUP-01), Scan Context v2 loop closure optimization (SUP-02), runtime profiling and Stage 3 speedup (SUP-03), IMU preintegration tight coupling (SUP-04), nuScenes cross-dataset evaluation (SUP-05).
+
+**Planned:** uncertainty visualization, degeneracy detection, ROS2 node wrapping, Docker Compose one-command demo, Lanelet2 routing graph, iSAM2 fixed-lag smoother comparison, interactive web demo, and HD map semantic layer extension.
 
 ## Benchmark Report
 
@@ -403,21 +380,7 @@ Key data files:
 
 <!-- TBD: SUP-10 will add visual evidence (screenshots, trajectory overlays) for each failure mode -->
 
-## Contributing & License
-
-### Contributing
-
-```bash
-# Lint and format check (required before PR)
-ruff check src/ && ruff format --check src/
-
-# Run tests
-pytest tests/ -v
-```
-
-See [`.github/workflows/ci.yml`](.github/workflows/ci.yml) for CI checks that run on every push.
-
-### License
+## License
 
 This project is licensed under the [MIT License](LICENSE).
 
@@ -435,10 +398,3 @@ This project builds on excellent open-source work:
 - [nuScenes](https://www.nuscenes.org/) — Caesar et al., CVPR 2020
 - [Scan Context](https://github.com/irapkaist/scancontext) — Kim & Kim, IROS 2018
 
-## Author
-
-**Haotian Zha** — Geodesist turned autonomous driving engineer.
-
-This project bridges geodesy and autonomous driving perception. My background in geodetic science — coordinate reference systems, network adjustment, uncertainty propagation — shapes how I approach SLAM differently from a pure robotics perspective. Where most SLAM implementations treat the coordinate frame as a detail, this pipeline explicitly manages the Velodyne-to-camera-to-UTM transformation chain, applies geodetic-grade factor graph optimization (GTSAM's Gauss-Newton is structurally identical to geodetic least-squares network adjustment), and produces output in Lanelet2 — a format designed for regulatory-grade HD maps.
-
-[Email](mailto:haotian.zha@gmail.com) · [LinkedIn](https://www.linkedin.com/in/haotianzha/) · [GitHub](https://github.com/trouties)
