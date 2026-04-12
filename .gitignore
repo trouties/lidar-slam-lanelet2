@@ -14,3 +14,4 @@ external/baselines/*/build/
 external/baselines/*/devel/
 external/baselines/*/results/*.txt
 /tmp/baseline_*.log
+CLAUDE.md
