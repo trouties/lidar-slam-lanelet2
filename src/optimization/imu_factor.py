@@ -7,6 +7,8 @@ consecutive LiDAR keyframes in the pose graph.
 
 from __future__ import annotations
 
+from typing import Callable
+
 import gtsam
 import numpy as np
 
@@ -110,7 +112,10 @@ def build_tight_coupled_graph(
     gyro_noise_sigma: float = 0.5,
     accel_bias_sigma: float = 0.1,
     gyro_bias_sigma: float = 0.01,
-) -> tuple[list[np.ndarray], list[np.ndarray]]:
+    return_marginals: bool = False,
+) -> tuple[list[np.ndarray], list[np.ndarray]] | tuple[
+    list[np.ndarray], list[np.ndarray], "Callable[[list[int]], dict[int, np.ndarray]]"
+]:
     """Build and optimize a tightly-coupled LiDAR-IMU pose graph.
 
     Combines LiDAR BetweenFactors with IMU preintegration factors.
@@ -272,4 +277,27 @@ def build_tight_coupled_graph(
         b = result.atConstantBias(B(i))
         bias_history.append(np.concatenate([b.accelerometer(), b.gyroscope()]))
 
-    return optimized_poses, bias_history
+    if not return_marginals:
+        return optimized_poses, bias_history
+
+    def marginals_fn(frame_indices: list[int]) -> dict[int, np.ndarray]:
+        """Position marginal covariance (3x3) for each requested LiDAR frame.
+
+        GTSAM Pose3 tangent is [rx,ry,rz,tx,ty,tz]; position block is ``[3:6, 3:6]``.
+        """
+        marginals = gtsam.Marginals(graph, result)
+        pose_keys = [P(i) for i in frame_indices]
+        out: dict[int, np.ndarray] = {}
+        try:
+            key_vec = gtsam.KeyVector(pose_keys)
+            joint = marginals.jointMarginalCovariance(key_vec)
+            for fi, pk in zip(frame_indices, pose_keys):
+                cov6 = np.asarray(joint.at(pk, pk))
+                out[fi] = np.ascontiguousarray(cov6[3:6, 3:6])
+        except Exception:
+            for fi, pk in zip(frame_indices, pose_keys):
+                cov6 = np.asarray(marginals.marginalCovariance(pk))
+                out[fi] = np.ascontiguousarray(cov6[3:6, 3:6])
+        return out
+
+    return optimized_poses, bias_history, marginals_fn

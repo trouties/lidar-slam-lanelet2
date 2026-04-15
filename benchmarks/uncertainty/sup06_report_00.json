@@ -1,0 +1,48 @@
+{
+  "sequence": "00",
+  "denial_window": [
+    2270,
+    2624
+  ],
+  "prior_stride": 50,
+  "sample_stride": 10,
+  "tail_buffer": 50,
+  "n_frames": 4541,
+  "n_samples": 459,
+  "modes": {
+    "loose": {
+      "pre_trace": 0.2679749493180909,
+      "max_denial_trace": 7.131145374758134,
+      "post_trace": 0.2864760812388284,
+      "prior_trace_median": 0.0002999196177800466,
+      "denial_ratio": 26.61123882252643,
+      "recovery_ratio": 1.0690405277352113,
+      "recovery_buffer": 50,
+      "tail_buffer": 50,
+      "n_pre_samples": 177,
+      "n_post_samples": 146,
+      "n_denial_samples": 38,
+      "n_prior_samples": 84,
+      "passed_inflation": true,
+      "passed_recovery": true,
+      "passed_no_nulls": true
+    },
+    "tight": {
+      "pre_trace": 0.2533976786494657,
+      "max_denial_trace": 6.9902807973101835,
+      "post_trace": 0.27153558010027623,
+      "prior_trace_median": 0.0002999183799583543,
+      "denial_ratio": 27.586206924097734,
+      "recovery_ratio": 1.0715787987777952,
+      "recovery_buffer": 50,
+      "tail_buffer": 50,
+      "n_pre_samples": 177,
+      "n_post_samples": 146,
+      "n_denial_samples": 38,
+      "n_prior_samples": 84,
+      "passed_inflation": true,
+      "passed_recovery": true,
+      "passed_no_nulls": true
+    }
+  }
+}

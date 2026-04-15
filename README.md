@@ -101,6 +101,29 @@ All 10 nuScenes mini scenes pass the APE < 10 m acceptance threshold.
 
 <!-- INSERT: results/nuscenes_ape_bar_chart.png -->
 
+### Pose Graph Uncertainty Under GNSS Denial (SUP-06)
+
+Per-keyframe **marginal covariance** is extracted from the GTSAM factor graph after Levenberg-Marquardt optimization (`gtsam.Marginals.jointMarginalCovariance`) and visualized as 3D 2σ confidence ellipsoids along the optimized trajectory. A 354-frame GNSS denial window (frames 2270–2624) in the middle of KITTI Seq 00 forces the optimizer to dead-reckon between distant priors; the position marginal `trace(Σ_pos)` inflates by **>26×** relative to the steady-state drift baseline, then collapses back to ~1.07× as priors resume.
+
+| Mode | drift baseline `trace(Σ_pos)` | denial peak | **peak / baseline** | post / baseline |
+|------|------------------------------:|------------:|--------------------:|----------------:|
+| Loose (LiDAR + pose graph) | 0.268 m² | 7.131 m² | **26.61×** | 1.07× |
+| Tight (+ IMU preintegration, SUP-04) | 0.253 m² | 6.990 m² | **27.59×** | 1.07× |
+
+Both modes pass the SUP-06 acceptance criteria (`peak / baseline ≥ 2×`, `post / baseline ≤ 1.5×`). Tight coupling mildly suppresses the denial peak (7.13 → 6.99 m², ~2%) and the drift baseline (0.268 → 0.253 m², ~6%) — limited by the conservative `accel_noise_sigma=5.0` lock from SUP-04 (FM-5).
+
+![SUP-06 loose GNSS denial uncertainty](benchmarks/uncertainty/ellipsoid_animation_00_loose.gif)
+
+![SUP-06 tight (IMU) GNSS denial uncertainty](benchmarks/uncertainty/ellipsoid_animation_00_tight.gif)
+
+> **Left panel**: 3D trajectory with the current keyframe's 2σ position ellipsoid (drawn at 30× visual scale on a 564 m sequence). Crimson segment = GNSS-denied window; gold segment = end-of-sequence boundary effect (last 50 frames lack downstream prior support, excluded from baseline statistics).
+>
+> **Right panel**: `trace(Σ_pos)` time series — green dots are GNSS-anchored frames pinned at `prior_sigma² ≈ 3 × 10⁻⁴ m²`; the blue line is the non-prior drift signature; horizontal dashed lines mark the drift baseline (median of non-prior drift outside denial + tail), 1.5× and 2× thresholds.
+>
+> **Baseline definition is non-trivial** — naively averaging all 459 sample frames mixes two populations (prior anchors at ~3 × 10⁻⁴ m² and dead-reckoning drift at ~0.27 m²) that differ by three orders of magnitude. The acceptance metric uses `median(non-prior drift outside [denial − 50, denial + 50] and outside last 50 frames)` to compare like with like.
+>
+> **Reproduce**: `python -m scripts.run_sup06 --sequence 00 --mode both` (loose ~5 min + tight ~8 min on a Ryzen-5 laptop). Outputs land in [`benchmarks/uncertainty/`](benchmarks/uncertainty/): per-mode CSV with full 3×3 marginals + `is_prior` / `is_tail` / `in_denial` flags, optimized trajectory `.npy`, static PNG with peak ellipsoid annotations, GIF animation, and a JSON acceptance report.
+
 ## Why This Matters
 
 **HD Maps are L3+ infrastructure.** Level 3 and above autonomous driving systems depend on centimeter-accurate HD maps for lane-level localization, path planning, and regulatory compliance. This pipeline demonstrates the complete chain from raw LiDAR scans to Lanelet2 — the open standard used by Autoware, Apollo, and European OEMs — covering localization, mapping, and map-layer extraction in a single reproducible workflow.
@@ -126,6 +149,8 @@ All 10 nuScenes mini scenes pass the APE < 10 m acceptance threshold.
 - **Per-frame runtime profiling** — p50/p95/max latency distributions per stage, with Stage 3 `sc_query` / `icp_verify` / `graph_optimize` sub-stage breakdown. Under the production loop-closure config (`sc_query_stride=1`, 2,635 closures on Seq 00), ICP verification is the true bottleneck (76% of Stage 3); a per-frame downsample cache reduces it 3.36× (p50 255 ms → 77 ms) for a **2.19× Stage 3 speedup** with zero APE regression (10.577 m unchanged).
 
 - **GNSS denial resilience** — Drift rate 0.003 m/m over 150 m masked GNSS windows (Seq 00: 0.41 m total drift over 150.3 m denial segment).
+
+- **Pose graph uncertainty visualization** — Per-keyframe marginal covariance extracted from GTSAM (`jointMarginalCovariance`) and rendered as 3D 2σ confidence ellipsoids along the optimized trajectory. A 354-frame GNSS-denial window inflates `trace(Σ_pos)` by **26.6×** (loose) / **27.6×** (tight + IMU) above the steady-state drift baseline, then collapses back within 1.07× as priors resume — both modes pass the SUP-06 acceptance bar.
 
 ## Quick Start
 
@@ -228,7 +253,7 @@ lidar-slam-hdmap/
 │   ├── fusion/              # Stage 4 — Error-State Kalman Filter
 │   ├── mapping/             # Stage 5 — Streaming voxel map builder + lane/curb feature extraction
 │   ├── export/              # Stage 6 — Lanelet2 OSM export with PCA classification
-│   ├── visualization/       # Trajectory plots + point cloud rendering
+│   ├── visualization/       # Trajectory plots, point cloud rendering, SUP-06 ellipsoid + animation
 │   ├── benchmarks/          # Evaluator, timing, GNSS denial, benchmark manifest
 │   └── cache/               # 5-layer deterministic cache (odometry → features)
 ├── scripts/
@@ -236,6 +261,7 @@ lidar-slam-hdmap/
 │   ├── benchmark_stage5.py  # 11-sequence Stage 5 iteration benchmarking
 │   ├── compare_tight_vs_loose.py  # SUP-04 IMU coupling comparison
 │   ├── eval_nuscenes.py     # SUP-05 cross-dataset evaluation
+│   ├── run_sup06.py         # SUP-06 uncertainty visualization (GNSS denial)
 │   ├── profile_stages.py    # SUP-03 per-frame latency profiling
 │   └── run_baseline_compare.py    # SUP-01 4-system comparison
 ├── tests/                   # 11 test modules (pytest)
@@ -299,9 +325,9 @@ Converts classified feature clusters to Lanelet2 OSM format.
 
 ### Supplement Tasks
 
-**Completed:** 4-system baseline comparison (SUP-01), Scan Context v2 loop closure optimization (SUP-02), runtime profiling and Stage 3 speedup (SUP-03), IMU preintegration tight coupling (SUP-04), nuScenes cross-dataset evaluation (SUP-05).
+**Completed:** 4-system baseline comparison (SUP-01), Scan Context v2 loop closure optimization (SUP-02), runtime profiling and Stage 3 speedup (SUP-03), IMU preintegration tight coupling (SUP-04), nuScenes cross-dataset evaluation (SUP-05), pose graph uncertainty visualization under GNSS denial (SUP-06).
 
-**Planned:** uncertainty visualization, degeneracy detection, ROS2 node wrapping, Docker Compose one-command demo, Lanelet2 routing graph, iSAM2 fixed-lag smoother comparison, interactive web demo, and HD map semantic layer extension.
+**Planned:** degeneracy detection, ROS2 node wrapping, Docker Compose one-command demo, Lanelet2 routing graph, iSAM2 fixed-lag smoother comparison, interactive web demo, and HD map semantic layer extension.
 
 ## Benchmark Report
 
@@ -316,6 +342,8 @@ Key data files:
 | [`benchmarks/tight_vs_loose/ape_compare.csv`](benchmarks/tight_vs_loose/ape_compare.csv) | IMU tight vs loose coupling comparison |
 | [`benchmarks/robustness_gnss_denied.csv`](benchmarks/robustness_gnss_denied.csv) | GNSS denial drift measurements |
 | [`benchmarks/runtime_profile_baseline_200f.csv`](benchmarks/runtime_profile_baseline_200f.csv) | Per-stage latency profile (200 frames) |
+| [`benchmarks/uncertainty/sup06_report_00.json`](benchmarks/uncertainty/sup06_report_00.json) | SUP-06 marginal covariance acceptance metrics (loose + tight) |
+| [`benchmarks/uncertainty/marginal_cov_00_loose.csv`](benchmarks/uncertainty/marginal_cov_00_loose.csv) | Per-keyframe 3×3 position marginals + bucket flags (459 rows) |
 
 ## Datasets
 

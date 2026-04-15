@@ -15,3 +15,12 @@ external/baselines/*/devel/
 external/baselines/*/results/*.txt
 /tmp/baseline_*.log
 CLAUDE.md
+
+# SUP-06 uncertainty viz — only ship the minimum artifacts needed
+# for README rendering (2 animated GIFs + JSON report + loose CSV).
+# PNGs / tight CSV / trajectory .npy stay local for re-render only.
+benchmarks/uncertainty/*
+!benchmarks/uncertainty/ellipsoid_animation_00_loose.gif
+!benchmarks/uncertainty/ellipsoid_animation_00_tight.gif
+!benchmarks/uncertainty/sup06_report_00.json
+!benchmarks/uncertainty/marginal_cov_00_loose.csv

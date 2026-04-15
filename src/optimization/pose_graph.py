@@ -47,6 +47,7 @@ class PoseGraphOptimizer:
         self.graph = gtsam.NonlinearFactorGraph()
         self.initial_values = gtsam.Values()
         self.n_poses = 0
+        self.result_values: gtsam.Values | None = None
 
     def build_graph(
         self,
@@ -131,11 +132,50 @@ class PoseGraphOptimizer:
         params = gtsam.LevenbergMarquardtParams()
         optimizer = gtsam.LevenbergMarquardtOptimizer(self.graph, self.initial_values, params)
         result = optimizer.optimize()
+        self.result_values = result
 
         optimized_poses = []
         for i in range(self.n_poses):
             optimized_poses.append(result.atPose3(i).matrix())
         return optimized_poses
+
+    def get_position_marginals(
+        self,
+        keys: list[int] | None = None,
+    ) -> dict[int, np.ndarray]:
+        """Extract the 3x3 position marginal covariance for selected keys.
+
+        GTSAM Pose3 uses tangent order [rx,ry,rz,tx,ty,tz], so the
+        translation block is ``cov[3:6, 3:6]``.
+
+        Args:
+            keys: Pose indices to query. ``None`` => all ``n_poses`` keys.
+
+        Returns:
+            Dict mapping pose index to ``(3, 3)`` covariance in m^2.
+
+        Raises:
+            RuntimeError: If :meth:`optimize` has not been called.
+        """
+        if self.result_values is None:
+            raise RuntimeError("optimize() must be called before get_position_marginals()")
+        if keys is None:
+            keys = list(range(self.n_poses))
+
+        marginals = gtsam.Marginals(self.graph, self.result_values)
+
+        out: dict[int, np.ndarray] = {}
+        try:
+            key_vec = gtsam.KeyVector(keys)
+            joint = marginals.jointMarginalCovariance(key_vec)
+            for k in keys:
+                cov6 = np.asarray(joint.at(k, k))
+                out[k] = np.ascontiguousarray(cov6[3:6, 3:6])
+        except Exception:
+            for k in keys:
+                cov6 = np.asarray(marginals.marginalCovariance(k))
+                out[k] = np.ascontiguousarray(cov6[3:6, 3:6])
+        return out
 
     @property
     def graph_size(self) -> int:
