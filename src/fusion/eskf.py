@@ -1,6 +1,14 @@
-"""Error-State Kalman Filter (ESKF) for pose smoothing.
+"""Error-State Kalman Filter (ESKF) for pose smoothing — Stage 4 CV fallback.
 
-Fuses sequential pose observations using a constant-velocity motion model.
+This module runs on the main ``run_pipeline.py`` path and is **not** an IMU
+fusion layer on KITTI Odometry (no IMU is present). It fuses sequential pose
+observations using a constant-velocity motion model and produces smoothed SE(3)
+poses; on already-optimized Stage 3 output the improvement is near zero — which
+is why README Stage 4 is labelled "Sensor Fusion (CV fallback)". True tight-
+coupled IMU integration lives in the separate ``src/optimization/imu_factor.py``
+path, invoked only by ``scripts/compare_tight_vs_loose.py`` and
+``scripts/run_sup06.py`` (the SUP-04 / "Stage 3.5" experimental branch).
+
 Uses error-state formulation to handle SO(3) rotation properly.
 
 Nominal state: position(3) + velocity(3) + quaternion(4) = 10 dims

@@ -1,6 +1,6 @@
 # LiDAR-Inertial SLAM & HD Map Pipeline
 
-> A production-grade LiDAR-inertial SLAM and HD Map feature extraction pipeline on KITTI/nuScenes — with EKF sensor fusion, Scan Context loop closure, and Lanelet2 export.
+> A research-grade, reproducible LiDAR-inertial SLAM & HD Map benchmark harness on KITTI/nuScenes — pose-graph optimization with Scan Context loop closure, LiDAR degeneracy analysis, dockerized baseline comparisons, and Lanelet2 geometry export.
 
 [![CI](https://img.shields.io/github/actions/workflow/status/trouties/lidar-slam-hdmap/ci.yml?branch=main&label=CI)](https://github.com/trouties/lidar-slam-hdmap/actions)
 ![Python](https://img.shields.io/badge/Python-3.10-3776AB?logo=python&logoColor=white)
@@ -14,25 +14,30 @@
 ## Pipeline Architecture
 
 ```
- Stage 1              Stage 2            Stage 3               Stage 4
+ Stage 1              Stage 2            Stage 3               Stage 4 *
  Data Ingestion       LiDAR Odometry     Graph Optimization    Sensor Fusion
 ┌──────────────┐    ┌───────────────┐   ┌──────────────────┐  ┌─────────────────┐
 │ KITTIDataset │    │   KISS-ICP    │   │  GTSAM Pose Graph│  │ Error-State KF  │
-│ NuScenesDset │───>│  adaptive ICP │──>│+ Scan Context v2 │─>│+ GTSAM tight    │
-│              │    │               │   │+ IMU Preintegr.  │  │  coupling       │
+│ NuScenesDset │───>│  adaptive ICP │──>│+ Scan Context v2 │─>│ const-velocity  │
+│              │    │               │   │  loop closure    │  │ fallback only   │
 └──────────────┘    └───────────────┘   └──────────────────┘  └────────┬────────┘
   (N,4) point         SE(3) 4x4            optimized SE(3)            │
   clouds              odometry poses       poses                      │
                                                                       v
-                     Stage 6              Stage 5              fused poses
+                     Stage 6 †            Stage 5              smoothed poses
                      HD Map Export        Mapping              + point clouds
                     ┌───────────────┐   ┌──────────────────┐         │
                     │ Lanelet2 .osm │<──│ Voxel Map Builder│<────────┘
-                    │ + GeoJSON     │   │+ Lane/Curb Extr. │
+                    │ LineString +  │   │+ Lane/Curb Extr. │
+                    │ Area only     │   │                  │
                     └───────────────┘   └──────────────────┘
-                      regulatory HD       PCA-classified
-                      map output          lane/curb clusters
+                      geometry layer      PCA-classified
+                      (no relations)      lane/curb clusters
 ```
+
+> \* **Stage 4 is pose smoothing only.** On KITTI Odometry (no IMU) it runs a constant-velocity model and cannot improve already-optimized poses. True IMU fusion lives in **Stage 3.5**, an experimental tight-coupled GTSAM-preintegration branch that is invoked by `scripts/compare_tight_vs_loose.py` / `scripts/run_sup06.py` (SUP-04 path) and **is NOT part of `run_pipeline.py`**. See FM-1.
+>
+> † **Stage 6 exports the geometry layer only** — `lineStringLayer` (LineString + Area); `laneletLayer` (lanelet relations, left/right pairing, routing topology) is not yet generated. The `.osm` is not Autoware/Apollo consumable as-is. See FM-3.
 
 ## Results
 
@@ -40,14 +45,18 @@
 
 Evaluated with [evo](https://github.com/MichaelGrupp/evo) APE (Absolute Pose Error). Lower is better.
 
-| System | Seq 00 APE RMSE (m) | Seq 00 APE Mean (m) | Seq 05 APE RMSE (m) | Seq 05 APE Mean (m) |
-|--------|---------------------:|--------------------:|---------------------:|--------------------:|
-| **Ours (fused)** | **11.53** | **10.22** | **3.23** | **2.80** |
-| hdl_graph_slam | 78.46 | 68.05 | 56.48 | 33.97 |
-| FAST-LIO2 | 77.41 | 61.32 | 20.69 | 15.56 |
-| LIO-SAM | 552.85 | 506.00 | 968.82 | 891.86 |
+> ⚠ **Read this before the table.** The "Our container rerun" column below reflects **our local Docker reproduction setups, not algorithm quality**. Our LIO-SAM / FAST-LIO2 containers hard-code the LiDAR↔IMU extrinsic (see `external/baselines/lio_sam/config/params.yaml:41-48`) instead of chaining it through `calib_imu_to_velo.txt` + `calib_velo_to_cam.txt` from the KITTI Raw calibration files. The resulting drift is roughly **two orders of magnitude above the published reference values** in the rightmost column — these numbers are reproduction-setup artifacts, not a fair comparison. Interpret algorithm quality from the `Paper-reported APE` column, not from ours. The rerun with correctly chained calibration is tracked as **P0-1** in `refs/pipeline-notes.md §20`.
 
-> Baselines run in Docker containers on identical KITTI sequences. See [`external/`](external/) for reproduction scripts.
+| System | Seq 00 RMSE (m) — our rerun | Seq 00 Mean (m) — our rerun | Seq 05 RMSE (m) — our rerun | Seq 05 Mean (m) — our rerun | Paper-reported APE (Seq 00, m) ‡ |
+|--------|-----------------------------:|----------------------------:|-----------------------------:|----------------------------:|---------------------------------:|
+| **Ours (fused)** | **11.53** | **10.22** | **3.23** | **2.80** | — (this work) |
+| hdl_graph_slam | 78.46 | 68.05 | 56.48 | 33.97 | ~6–15 |
+| FAST-LIO2 | 77.41 | 61.32 | 20.69 | 15.56 | ~3–8 |
+| LIO-SAM | 552.85 | 506.00 | 968.82 | 891.86 | ~3–7 |
+
+> ‡ Approximate Seq 00 APE ranges from the respective publications / follow-up KITTI evaluations; included as a sanity-check axis so the reader can read algorithm quality independently of our container setup. Exact numbers vary by metric (RMSE vs mean), trajectory alignment (SE(3) vs Sim(3)), and evaluator version. See the LIO-SAM, FAST-LIO2, and hdl_graph_slam papers for the authoritative values.
+>
+> Baseline container entry points live in [`external/`](external/). Fix status: see `refs/pipeline-notes.md §20` (P0-1 — correctly chained KITTI Raw calibration).
 
 ### Stage-by-Stage Accuracy Improvement (Seq 00)
 
@@ -55,12 +64,14 @@ Evaluated with [evo](https://github.com/MichaelGrupp/evo) APE (Absolute Pose Err
 |------------------------|-------------:|------:|
 | Stage 2: KISS-ICP odometry only | 12.53 | baseline |
 | Stage 3: + pose graph + Scan Context loop closure | 11.53 | −8.0% |
-| Stage 3†: + IMU tight coupling (GTSAM preintegration) | 9.22 | −20.0% vs loose |
-| Stage 4: + ESKF fusion | 11.53 | <0.01 m ‡ |
+| Stage 3.5 §: + IMU tight coupling (separate script, SUP-04) | 9.22 | −20.0% vs loose |
+| Stage 4: + ESKF pose smoothing | 11.53 | <0.01 m ‡ |
 
-> † Uses KITTI Raw OxTS data via SUP-04 tight coupling path (Forster 2017 IJRR preintegration factor).
+> § Stage 3.5 is **not part of `run_pipeline.py`**. It is an experimental tight-coupled GTSAM-preintegration branch invoked by `scripts/compare_tight_vs_loose.py` (SUP-04). It uses KITTI Raw OxTS IMU (Forster 2017 IJRR factor) and is shown here for the reader to see the potential IMU benefit, not as a default pipeline stage.
 >
-> ‡ KITTI Odometry contains no IMU data — ESKF uses a constant-velocity model and cannot improve already-optimized poses. Full ESKF value appears on datasets with raw IMU (nuScenes, KITTI Raw).
+> ‡ KITTI Odometry contains no IMU data — Stage 4 ESKF falls back to a constant-velocity model and cannot improve already-optimized poses. Stage 4 is pose smoothing, not IMU fusion, on this dataset.
+>
+> **Note on Stage 2 vs the literature.** Our Stage 2 (KISS-ICP wrapper) achieves **12.53 m APE RMSE** on Seq 00, which is **above the 5–8 m typically reported for pure KISS-ICP** in the literature. Candidate root causes under investigation (tracked as P1-1 / SUP-13 in `refs/pipeline-notes.md`): KISS-ICP parameter drift (`voxel_size` / `min_range` / adaptive threshold / deskew), coordinate-frame mismatch, and timestamp alignment. The loop-closure improvement of only −8.0% also suggests that many of the 2 635 detected closures are redundant rather than contributing new constraints — reopening the precision/recall trade-off is part of the same investigation.
 
 ### Performance
 
@@ -76,9 +87,11 @@ Evaluated with [evo](https://github.com/MichaelGrupp/evo) APE (Absolute Pose Err
 | Stage 3 ICP verify speedup (downsample cache) | 3.36× (p50 255 ms → 77 ms) |
 | GNSS denial drift (Seq 00, 150 m window) | 0.003 m/m |
 
-### Cross-Dataset Validation (nuScenes)
+### Stage 2 Odometry Generalization (nuScenes mini)
 
-All 10 nuScenes mini scenes pass the APE < 10 m acceptance threshold.
+> **Scope caveat.** nuScenes mini clips are ~20 s single-pass segments with no revisits. **Stage 3 loop closure fires zero times on all 10 scenes** (verify: `benchmarks/nuscenes_ape.csv` — Stage 2 and Stage 3 APE are bit-identical to the last decimal place for every scene). What this experiment demonstrates is the **portability of our Stage 2 odometry wrapper across a different sensor and sampling rate** (HDL-64E 10 Hz → VLP-32C 20 Hz), **not** the full pipeline, not cross-dataset loop closure, and not cross-dataset HD map export.
+
+All 10 nuScenes mini scenes pass the Stage 2 APE < 10 m threshold.
 
 | Scene | Frames | Stage 2 APE Mean (m) | Stage 3 APE Mean (m) |
 |-------|-------:|---------------------:|---------------------:|
@@ -124,11 +137,13 @@ A 3×3 translation-block Hessian `H_t = Σ nᵢnᵢᵀ` (point-to-plane, PCA-nor
 
 Both acceptance criteria pass: (1) Seq 01 `cond_p50` ≥ 2×Seq 00 `cond_p95` (gap 1.12×), (2) APE no-regression. Seq 01's 98% sustained rate is ground truth — the whole highway IS degenerate, and per-frame downgrade correctly collapses to sequence-level downgrade. The BEV above uses a log-gradient colormap for cond magnitude, a black trajectory overlay for the sustained runs, and red X markers for the top-25% sub-spans (~275 frames) — two clusters near frames 480–540 and 800–830 are the worst within an already-degenerate segment.
 
-> † Seq 01 has zero loop closures in the production config; with only the anchor prior at frame 0, the pose graph is uniquely determined by the initial trajectory and edge-sigma changes have no effect. The "no harm" criterion is trivially satisfied. On a sequence with denial-aware GNSS priors, the SUP-07 downgrade hands position work over to the SUP-04 IMU factor — the two are complementary.
+> **Note on practical value.** The APE deltas reported above (Seq 00 −0.24%, Seq 01 0.00%) are **within measurement noise**. The current acceptance criteria verify that the detector's mathematical machinery is sound — condition-number separation between urban and highway sequences, no silent regression on the non-degenerate case — **not** that σ inflation yields a measurable localization win. A proven end-to-end benefit requires integration with the tight-coupled IMU branch (SUP-04) on a sequence that simultaneously has (a) active degeneracy, (b) a GNSS-denied window, and (c) raw IMU available. That joint validation is tracked as **P2-1 (SUP-18)** in `refs/pipeline-notes.md` and has not yet been carried out.
+
+> † Seq 01 has zero loop closures in the production config; with only the anchor prior at frame 0, the pose graph is uniquely determined by the initial trajectory and edge-sigma changes have no effect. The "no harm" criterion is trivially satisfied. On a sequence with denial-aware GNSS priors, the SUP-07 downgrade is **intended** to hand position work over to the SUP-04 IMU factor — this complementarity is a design hypothesis, not yet empirically validated (see the note above).
 
 ## Scope
 
-The complete chain from raw LiDAR scans to Lanelet2 HD Maps — the open standard used by Autoware, Apollo, and European OEMs — covering localization, mapping, and map-layer extraction in a single reproducible workflow. This is the infrastructure layer that most portfolio projects skip: not perception alone (3D detection, lane segmentation), but the localization → mapping → HD map export chain that feeds downstream planning and control.
+The complete chain from raw LiDAR scans to Lanelet2 `.osm` output — Lanelet2 is the open standard used by Autoware, Apollo, and European OEMs. Our export currently covers the **geometry layer** (lane / curb polylines and areas); the **semantic layer** (lanelet relations, left/right pairing, routing topology, regulatory elements) is future work tracked as SUP-12. This project is the infrastructure layer that most portfolio projects skip: not perception alone (3D detection, lane segmentation), but the localization → mapping → HD-map-geometry export chain that feeds downstream planning and control.
 
 The author's geodetic-science background shapes the implementation: explicit WGS84 → UTM (EPSG:32632) reference frames, rigorous Velodyne ↔ camera ↔ world calibration chains, and GTSAM's factor-graph optimization treated as a generalization of the least-squares network adjustment geodesists have used for two centuries.
 
@@ -137,7 +152,7 @@ The author's geodetic-science background shapes the implementation: explicit WGS
 - **Multi-dataset SLAM** — KITTI (HDL-64E, 10 Hz) and nuScenes (VLP-32C, 20 Hz sweeps) with per-dataset parameter adaptation.
 - **Scan Context v2 loop closure** — appearance-based place recognition, 2,635 closures on Seq 00 at precision 0.967 (ICP fitness gate 0.9).
 - **Tight-coupled IMU preintegration** — GTSAM Forster-2017 factor, −20% APE vs loose fusion on Seq 00 when IMU is available.
-- **Lanelet2 HD Map export** — PCA-classified lane / curb morphology, RDP-simplified (ε = 0.05 m), written as Lanelet2 `.osm` with geometry metadata tags.
+- **Lanelet2 geometry export** — PCA-classified lane / curb morphology, RDP-simplified (ε = 0.05 m), written as Lanelet2 `.osm` (LineString + Area in `lineStringLayer` only). **`laneletLayer` is empty** — no lanelet relations, no left/right pairing, no routing topology. The `.osm` is not yet Autoware/Apollo consumable as a semantic HD map; lanelet-relation generation is tracked as **P1-2 / SUP-12**. See FM-3.
 - **4-system baseline comparison** — Dockerized hdl_graph_slam / FAST-LIO2 / LIO-SAM with full APE/RPE tables on KITTI Seq 00, 05.
 - **Runtime profiling + Stage-3 2.19× speedup** — per-frame latency distributions; the production `sc_query_stride=1` bottleneck (8,285 candidates × 2 downsamples) collapses 3.36× via a per-unique-frame downsample cache, zero APE regression.
 - **Pose graph uncertainty under GNSS denial (SUP-06)** — GTSAM marginals → 3D 2σ ellipsoids, `trace(Σ_pos)` inflates 26–28× inside a 354-frame denial window and recovers within 1.07×.
@@ -270,13 +285,13 @@ lidar-slam-hdmap/
 | 1 | **Data Ingestion** | KITTI `.bin` / nuScenes sweeps → `(N, 4)` ndarrays + GT poses | All processing in Velodyne frame (x-forward); camera-frame conversion only at evaluation / export. |
 | 2 | **LiDAR Odometry** | `(N, 3)` points → SE(3) odometry poses | KISS-ICP adaptive-threshold; dataset-specific `voxel_size` / `min_range` to compensate for beam-count differences. |
 | 3 | **Graph Optimization** | odometry + clouds + IMU → globally optimized SE(3) | GTSAM LM with Scan Context v2 loop closure, ICP fitness gate 0.9 for precision, optional GTSAM IMU preintegration, optional SUP-07 per-edge sigma downgrade. |
-| 4 | **Sensor Fusion** | optimized poses + IMU → fused SE(3) | Dual path: ESKF (constant-velocity fallback) and GTSAM tight coupling (when raw IMU available, −20% APE). |
+| 4 | **Sensor Fusion (CV fallback)** | optimized poses → smoothed SE(3) | **Pose smoothing only when no IMU.** ESKF runs with a constant-velocity model; there is **no IMU integration on the main `run_pipeline.py` path**. The SUP-04 tight-coupled IMU variant is a separate evaluation pipeline (Stage 3.5 in the architecture diagram), invoked only by `compare_tight_vs_loose.py` / `run_sup06.py`. |
 | 5 | **Mapping & Features** | fused poses + clouds → lane / curb clusters + global map | NumPy streaming voxel aggregation (<4 GB RAM). Lane: `intensity ≥ 0.40` + DBSCAN. Curb: height-jump in 0.30 m grid. |
-| 6 | **HD Map Export** | PCA-classified clusters → Lanelet2 `.osm` | RDP polyline simplification (ε = 0.05 m), separate lane (3-class) and curb (single-class with rescue trim) pipelines, geometry metadata tags. |
+| 6 | **HD Map Export (geometry layer)** | PCA-classified clusters → Lanelet2 `.osm` (LineString + Area only) | RDP polyline simplification (ε = 0.05 m), separate lane (3-class) and curb (single-class with rescue trim) pipelines, geometry metadata tags. `laneletLayer` is empty — no left/right pairing or routing (FM-3, P1-2). |
 
 ### Supplement Tasks
 
-**Completed (P0 + P1):** 4-system baseline comparison (SUP-01), Scan Context v2 loop closure (SUP-02), runtime profiling + Stage 3 2.19× speedup (SUP-03), IMU tight coupling (SUP-04), nuScenes cross-dataset evaluation (SUP-05), pose graph uncertainty under GNSS denial (SUP-06), LiDAR degeneracy detection (SUP-07).
+**Completed (P0 + P1):** 4-system baseline comparison (SUP-01), Scan Context v2 loop closure (SUP-02), runtime profiling + Stage 3 2.19× speedup (SUP-03), IMU tight coupling (SUP-04), nuScenes odometry generalization (SUP-05), pose graph uncertainty under GNSS denial (SUP-06), LiDAR degeneracy detection (SUP-07). **Several of these tasks carry methodological caveats** — see the disclaimers at the top of each section and the `Known Limitations` table below (notably FM-1, FM-3, FM-5, FM-7) before interpreting the headline numbers.
 
 **Planned:** ROS2 node wrapping, Docker Compose one-command demo, Lanelet2 routing graph + A*, iSAM2 fixed-lag smoother comparison, interactive web demo, and HD map semantic layer extension.
 
@@ -326,11 +341,11 @@ Key data files:
 
 | # | Mode | Root cause & status |
 |---|------|---------------------|
-| FM-1 | **ESKF adds no value on KITTI Odometry** (Stage 4 APE ≈ Stage 3) | KITTI Odometry has no IMU; ESKF falls back to constant-velocity which cannot improve already-optimized poses. By design — use KITTI Raw / nuScenes. Tight coupling (SUP-04) demonstrates the real IMU benefit (−20% APE). |
+| FM-1 | **ESKF adds no value on KITTI Odometry** (Stage 4 APE ≈ Stage 3) | KITTI Odometry has no IMU; Stage 4 ESKF runs a constant-velocity model and cannot improve already-optimized poses. **Stage 4 is renamed in this README to "Sensor Fusion (CV fallback)" to reflect this** — it is pose smoothing, not IMU fusion, on the main pipeline. True IMU integration requires the **Stage 3.5 tight-coupled branch (SUP-04)**, which is invoked by `scripts/compare_tight_vs_loose.py` / `scripts/run_sup06.py` and **is not part of `run_pipeline.py`**. |
 | FM-2 | **Loop closure recall capped at ~20%** (P = 0.967, R = 0.195) | GT defines ~13 050 valid pairs; `max_matches_per_query=5` structurally caps at ~22%, ICP@0.9 prunes further. Raising the cap yields diminishing returns with linear ICP cost. |
-| FM-3 | **Empty lanelet relations** (only LineStrings / Areas in `.osm`) | Curb-driven left/right boundary pairing not yet implemented. P2 task, prerequisite for SUP-12 routing graph. |
+| FM-3 | **Empty lanelet relations — the `.osm` is geometric output, not a semantic HD map** | Stage 6 writes only the `lineStringLayer` (LineString + Area); `laneletLayer` is empty. Downstream consumers that expect left/right lane pairing, direction, or routing topology (Autoware, Apollo) will see **zero lanelets**. Curb-driven left/right pairing is the minimum-viable fix, tracked as **P1-2 (SUP-12)**. |
 | FM-4 | **Flat-ground assumption** (lane / curb lost on hills, multi-level) | Fixed `road_z_min/max = [-2.0, -1.5]` window. Requires per-frame terrain adaptation. P3 task. |
-| FM-5 | **Conservative IMU noise lock** (`accel_noise_sigma = 5.0`) | KITTI OxTS is filtered navigation data, not raw IMU. Datasheet-level σ = 0.3 causes APE to explode to 27.85 m due to timestamp alignment and calibration residuals. Locked until raw-IMU dataset is available. |
+| FM-5 | **Conservative IMU noise lock** (`accel_noise_sigma = 5.0`, **~17× the OxTS manual value of 0.3 m/s²**) | `σ = 5.0` is not a tuned value but a **workaround** covering three unresolved issues: (1) approximate LiDAR↔IMU timestamp alignment (Odometry t=0 ≈ Raw drive t=0, not exact), (2) OxTS outputs filtered navigation data rather than raw IMU — our preintegration model is mismatched, (3) calibration residuals become systematic errors once IMU is trusted tightly. The −20% APE reported for SUP-04 (Stage 3.5) is valid but **contingent on this inflated σ** — tightening to the datasheet σ = 0.3 causes Tight APE to explode to 27.85 m. See `configs/default.yaml:41-51` for the locked values and the rationale. Proper fix tracked as **P0-2** in `refs/pipeline-notes.md §16`. |
 | FM-6 | **No traffic sign / signal extraction** | Stage 5 filters the road-plane z-band only; vertical structures are excluded by design. SUP-17 (P2) will add heuristic stop-line / crosswalk detection. |
 | FM-7 | **Seq 01 has zero loop closures in production config** | Highway has no revisits — Scan Context cannot fire. Edge-sigma downgrades therefore have no effect on Seq 01 APE even with SUP-07 enabled; expected handover target is an IMU / GNSS prior, not loop closure. |
 
