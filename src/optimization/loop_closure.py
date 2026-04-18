@@ -283,6 +283,9 @@ class LoopClosureDetector:
         # table. This keeps memory bounded across sequences and avoids
         # stale hits when poses change.
         self._downsample_cache = {}
+        # Reset pre-ICP candidate snapshot; populated after dedupe below
+        # so eval tooling can compare pre-ICP vs post-ICP TP in one pass.
+        self.last_pre_icp_candidates: list[tuple[int, int]] = []
 
         # Gather candidates from selected mode(s)
         pairs: list[tuple[int, int]] = []
@@ -306,6 +309,8 @@ class LoopClosureDetector:
             if key not in seen:
                 seen.add(key)
                 candidates.append((i, j))
+
+        self.last_pre_icp_candidates = list(candidates)
 
         if not candidates:
             return []

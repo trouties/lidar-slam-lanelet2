@@ -37,14 +37,11 @@ lio_sam:
   lidarMinRange: 5.0
   lidarMaxRange: 100.0
 
-  # IMU Settings — OxTS RT3003 datasheet values. The earlier 100x-inflated
-  # workaround was a wrong-direction fix; the real bug was that we were
-  # feeding LIO-SAM nav-frame, gravity-compensated accelerations from OxTS
-  # cols 11-13 instead of body-frame raw accelerations. Handled in
-  # common/kitti_to_rosbag.py::_oxts_body_accel (cols 14-16, body-frame
-  # specific force; OxTS af/al/au already include g, so no gravity
-  # reinjection — the gravity-reinjection premise was empirically wrong
-  # for KITTI). See SUP-01 P0-1 Stage 3 in pipeline-notes.
+  # IMU Settings — OxTS RT3003 datasheet values. R1 loosening experiment
+  # (100× σ) made APE 6×worse (1076m → 6406m), so the "Large velocity, reset
+  # IMU-preintegration!" at 470+/4541 frames is NOT a noise tuning issue —
+  # it's structural (IMU content vs LIO-SAM expectations). Keep datasheet
+  # values; root cause tracked as SUP-01 P0-3 in pipeline-notes §20.
   imuAccNoise: 3.9939570888238808e-03
   imuGyrNoise: 1.5636343949698187e-03
   imuAccBiasN: 6.4356659353532566e-05
@@ -52,19 +49,20 @@ lio_sam:
   imuGravity: 9.80511
   imuRPYWeight: 0.01
 
-  # Extrinsics — placeholders. INJECTED at build time by
-  # external/baselines/common/inject_kitti_extrinsic.py from the KITTI Raw
-  # calib_imu_to_velo.txt of the matching date. Do NOT hand-edit; per-seq
-  # docker tags (slam-baselines/lio_sam:seq00, :seq05, ...) are produced by
-  # `make build-liosam-<seq>` so each sequence carries its own calibration.
-  # extrinsicRPY is set equal to extrinsicRot (= R_velo_imu), matching the
-  # upstream params_kitti.yaml. Forcing it to a pure identity (because
-  # R_velo_imu is "close enough to I") regresses Seq 00 SE(3) APE from 30 m
-  # to 44 m -- LIO-SAM treats RPY as exact, not as an approximation. See
-  # SUP-01 P0-1 rework notes in pipeline-notes for the measurement.
-  extrinsicTrans: [-8.086759000e-01, 3.195559000e-01, -7.997231000e-01]
-  extrinsicRot: [9.999976000e-01, 7.553071000e-04, -2.035826000e-03, -7.854027000e-04, 9.998898000e-01, -1.482298000e-02, 2.024406000e-03, 1.482454000e-02, 9.998881000e-01]
-  extrinsicRPY: [9.999976000e-01, 7.553071000e-04, -2.035826000e-03, -7.854027000e-04, 9.998898000e-01, -1.482298000e-02, 2.024406000e-03, 1.482454000e-02, 9.998881000e-01]
+  # Extrinsics — RENDERED AT RUNTIME by envsubst (Stage C of SUP-01 P0-1).
+  # run.sh derives R/T from KITTI Raw calib_imu_to_velo.txt for the current
+  # sequence date and sets KITTI_EXT_TRANS / KITTI_EXT_ROT before launching.
+  # A single image slam-baselines/lio_sam:latest serves all sequences; the
+  # per-sequence calibration is picked up from the $SEQ env var. Runtime
+  # rendering replaces the build-time `inject_kitti_extrinsic.py` pipeline,
+  # which suffered from a docker layer-cache divergence (see §20.4 in
+  # refs/pipeline-notes.md). Do NOT hand-edit the rendered file — it is
+  # regenerated every container start.
+  # extrinsicRPY is set equal to extrinsicRot; forcing identity regresses
+  # Seq 00 SE(3) APE by ~15 m because LIO-SAM treats RPY as exact.
+  extrinsicTrans: [${KITTI_EXT_TRANS}]
+  extrinsicRot: [${KITTI_EXT_ROT}]
+  extrinsicRPY: [${KITTI_EXT_ROT}]
 
   # LOAM feature threshold
   edgeThreshold: 1.0

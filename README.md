@@ -41,31 +41,34 @@
 
 ## Results
 
-### System Accuracy Comparison
+### System Accuracy Comparison — KITTI Seq 00
 
-Evaluated with [evo](https://github.com/MichaelGrupp/evo) APE (Absolute Pose Error). Lower is better.
+Evaluated with [evo](https://github.com/MichaelGrupp/evo) **SE(3)-aligned APE** (Absolute Pose Error, post `--align`). All baselines consume a single shared, test-gated rosbag cache (`external/baselines/common/test_kitti_to_rosbag.py` — 23 invariants on conversion, extrinsic injection, IMU body/nav frames, and timestamp monotonicity). Container entry points live in [`external/`](external/).
 
-> ⚠ **Read this before the table.** The "Our container rerun" column below reflects **our local Docker reproduction setups, not algorithm quality**. Our LIO-SAM / FAST-LIO2 containers hard-code the LiDAR↔IMU extrinsic (see `external/baselines/lio_sam/config/params.yaml:41-48`) instead of chaining it through `calib_imu_to_velo.txt` + `calib_velo_to_cam.txt` from the KITTI Raw calibration files. The resulting drift is roughly **two orders of magnitude above the published reference values** in the rightmost column — these numbers are reproduction-setup artifacts, not a fair comparison. Interpret algorithm quality from the `Paper-reported APE` column, not from ours. The rerun with correctly chained calibration is tracked as **P0-1** in `refs/pipeline-notes.md §20`.
+| System | Seq 00 SE(3) APE (m) | Paper-reported (Seq 00, m) ‡ | Reproduction status |
+|--------|---------------------:|-----------------------------:|:--------------------|
+| **Ours (fused)** | **10.58** | — (this work) | **Reproduced** (≤ 11 m) |
+| FAST-LIO2 | 110.4 | ~3–8 | needs-investigation † |
+| hdl_graph_slam | 200.4 | ~6–15 | needs-investigation † |
+| LIO-SAM | 582.5 | ~3–7 | needs-investigation † |
 
-| System | Seq 00 RMSE (m) — our rerun | Seq 00 Mean (m) — our rerun | Seq 05 RMSE (m) — our rerun | Seq 05 Mean (m) — our rerun | Paper-reported APE (Seq 00, m) ‡ |
-|--------|-----------------------------:|----------------------------:|-----------------------------:|----------------------------:|---------------------------------:|
-| **Ours (fused)** | **11.53** | **10.22** | **3.23** | **2.80** | — (this work) |
-| hdl_graph_slam | 78.46 | 68.05 | 56.48 | 33.97 | ~6–15 |
-| FAST-LIO2 | 77.41 | 61.32 | 20.69 | 15.56 | ~3–8 |
-| LIO-SAM | 552.85 | 506.00 | 968.82 | 891.86 | ~3–7 |
-
-> ‡ Approximate Seq 00 APE ranges from the respective publications / follow-up KITTI evaluations; included as a sanity-check axis so the reader can read algorithm quality independently of our container setup. Exact numbers vary by metric (RMSE vs mean), trajectory alignment (SE(3) vs Sim(3)), and evaluator version. See the LIO-SAM, FAST-LIO2, and hdl_graph_slam papers for the authoritative values.
+> † **None of the three container baselines reproduce paper-class numbers on this host.** SUP-01 P0-1 ran a four-phase rework (calibration injection, IMU body-frame switch, runtime envsubst rendering, IMU-frame ablation, runtime IMU-timing diagnostic). Findings:
+> - LIO-SAM logs **~425 "Large velocity, reset IMU-preintegration!" warnings per Seq 00 run** regardless of body- vs. nav-frame OxTS feed. The runtime diagnostic (`scripts/diagnose_liosam_run.py`) shows resets are **uniformly distributed in bag time** and **only 1.9 % (8/425) correlate with IMU stamp gaps** (bag has just 9 gaps > 50 ms total; IMU dt p99=10.93 ms at 100 Hz) — root cause is IMU content interpretation inside `imuPreintegration.cpp`, not bag/runtime pathology.
+> - **Best LIO-SAM achieved**: SE(3) APE = 582 m using nav-frame OxTS accel (cols 11–13). Body-frame specific force (cols 14–16) gives 1076 m. The historical `slam-baselines/lio_sam:stage0-v3` baseline (cited as 27 m elsewhere) is **not reproducible** on any current bag variant we built — likely depended on an older OxTS preprocessing path that no longer exists.
+> - **FAST-LIO2 / hdl_graph_slam** were not specifically tuned in this sub-task; their numbers reflect a single rerun on the current shared bag without per-system parameter sweep. The order of magnitude (110 / 200 m vs. paper 3–15 m) suggests a similar shared-config issue rather than algorithmic divergence.
 >
-> Baseline container entry points live in [`external/`](external/). Fix status: see `refs/pipeline-notes.md §20` (P0-1 — correctly chained KITTI Raw calibration).
+> ‡ Paper-reported ranges from the respective LIO-SAM, FAST-LIO2, hdl_graph_slam publications / follow-up KITTI evaluations. Use these — not our reproduction column — to read algorithm quality.
+>
+> See `refs/pipeline-notes.md §20` for the complete diagnostic timeline (4 phases, IMU-frame bisect ablations, the v1-broken→v6 transition recorded in `benchmarks/accuracy_table.csv`). Reproduction setup remains an **open SUP-01 P0-2** item; we publish "needs-investigation" rather than the prior 552 m / 77 m / 78 m headline numbers because reproducibility-equivalence with the published baselines could not be honestly claimed.
 
 ### Stage-by-Stage Accuracy Improvement (Seq 00)
 
 | Pipeline Configuration | APE RMSE (m) | Delta |
 |------------------------|-------------:|------:|
 | Stage 2: KISS-ICP odometry only | 12.53 | baseline |
-| Stage 3: + pose graph + Scan Context loop closure | 11.53 | −8.0% |
+| Stage 3: + pose graph + Scan Context loop closure | 10.58 | −15.6% |
 | Stage 3.5 §: + IMU tight coupling (separate script, SUP-04) | 9.22 | −20.0% vs loose |
-| Stage 4: + ESKF pose smoothing | 11.53 | <0.01 m ‡ |
+| Stage 4: + ESKF pose smoothing | 10.58 | <0.01 m ‡ |
 
 > § Stage 3.5 is **not part of `run_pipeline.py`**. It is an experimental tight-coupled GTSAM-preintegration branch invoked by `scripts/compare_tight_vs_loose.py` (SUP-04). It uses KITTI Raw OxTS IMU (Forster 2017 IJRR factor) and is shown here for the reader to see the potential IMU benefit, not as a default pipeline stage.
 >

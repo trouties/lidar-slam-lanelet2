@@ -9,7 +9,9 @@
   <param name="preprocess/blind" type="double" value="2.0" />
   <param name="publish/path_en" type="bool" value="true" />
   <param name="pcd_save/pcd_save_en" type="bool" value="false" />
-  <param name="mapping/extrinsic_T" type="yaml" value="[0.0, 0.0, 0.0]" />
+  <!-- Do NOT override mapping/extrinsic_T here. kitti.yaml carries the real
+       KITTI Raw calib (~0.8 m LiDAR-IMU offset). A zero override was a
+       SUP-01 regression caught by scripts/audit_baseline_configs.py. -->
 
   <node pkg="fast_lio" type="fastlio_mapping" name="laserMapping"
         output="screen" respawn="false">

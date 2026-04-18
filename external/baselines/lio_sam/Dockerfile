@@ -37,9 +37,23 @@ RUN /bin/bash -c "source /opt/ros/noetic/setup.bash && \
     cd /catkin_ws && \
     catkin_make -DCMAKE_BUILD_TYPE=Release -j$(nproc)"
 
-# Copy scripts and config
-COPY common/kitti_to_rosbag.py /scripts/kitti_to_rosbag.py
+# Stage C runtime deps: gettext-base for envsubst (renders params.yaml.tpl
+# at container start); python3-numpy for extrinsic_to_env.py. Placed after
+# catkin_make so adding them does not invalidate the (expensive) LIO-SAM
+# build layer.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gettext-base \
+    python3-numpy \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy scripts and config. Note: bag generation + IMU timestamp repair now
+# happens in the separate slam-baselines/bag-builder image; at runtime
+# LIO-SAM consumes a cached bag mounted at /data/bags/kitti_${SEQ}_fixed.bag.
+# kitti_to_rosbag.py and fix_imu_timestamps.py are no longer used inside
+# this image, but extract_poses.py is still needed for odometry dump.
 COPY common/extract_poses.py /scripts/extract_poses.py
+COPY common/extrinsic_to_env.py /scripts/extrinsic_to_env.py
+COPY common/inject_kitti_extrinsic.py /scripts/inject_kitti_extrinsic.py
 COPY lio_sam/config/ /config/
 COPY lio_sam/launch/ /launch/
 COPY lio_sam/run.sh /scripts/run.sh

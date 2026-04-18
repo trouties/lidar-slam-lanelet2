@@ -557,5 +557,98 @@
         "overall": true
       }
     }
+  },
+  {
+    "run_id": "2df00318f2a4",
+    "task": "SUP-01",
+    "git_sha": "2d7ea737f514c394c6ff93e514cf3b7bad729e80",
+    "config_hash": "2a658def50e38e8f",
+    "timestamp": "2026-04-16T21:32:06.947886+00:00",
+    "sequences": [
+      "00"
+    ],
+    "artifacts": [
+      "benchmarks/accuracy_table.csv",
+      "benchmarks/latency_table.csv",
+      "benchmarks/robustness_gnss_denied.csv"
+    ],
+    "metrics": {
+      "n_accuracy_rows": 9,
+      "n_latency_rows": 7,
+      "n_gnss_rows": 1,
+      "baselines_attempted": [
+        "own",
+        "lio_sam",
+        "fast_lio2",
+        "hdl_graph_slam"
+      ],
+      "per_sequence": {
+        "00": "10.5804"
+      },
+      "validation_pass": true,
+      "violations": []
+    }
+  },
+  {
+    "run_id": "f4a39939e3a5",
+    "task": "SUP-01",
+    "git_sha": "2d7ea737f514c394c6ff93e514cf3b7bad729e80",
+    "config_hash": "2a658def50e38e8f",
+    "timestamp": "2026-04-16T21:58:52.236505+00:00",
+    "sequences": [
+      "00"
+    ],
+    "artifacts": [
+      "benchmarks/accuracy_table.csv",
+      "benchmarks/latency_table.csv",
+      "benchmarks/robustness_gnss_denied.csv"
+    ],
+    "metrics": {
+      "n_accuracy_rows": 9,
+      "n_latency_rows": 7,
+      "n_gnss_rows": 1,
+      "baselines_attempted": [
+        "own",
+        "lio_sam",
+        "fast_lio2",
+        "hdl_graph_slam"
+      ],
+      "per_sequence": {
+        "00": "10.5804"
+      },
+      "validation_pass": true,
+      "violations": []
+    }
+  },
+  {
+    "run_id": "e5d079d24dbe",
+    "task": "SUP-01",
+    "git_sha": "2d7ea737f514c394c6ff93e514cf3b7bad729e80",
+    "config_hash": "2a658def50e38e8f",
+    "timestamp": "2026-04-16T22:54:19.938662+00:00",
+    "sequences": [
+      "00"
+    ],
+    "artifacts": [
+      "benchmarks/accuracy_table.csv",
+      "benchmarks/latency_table.csv",
+      "benchmarks/robustness_gnss_denied.csv"
+    ],
+    "metrics": {
+      "n_accuracy_rows": 9,
+      "n_latency_rows": 7,
+      "n_gnss_rows": 1,
+      "baselines_attempted": [
+        "own",
+        "lio_sam",
+        "fast_lio2",
+        "hdl_graph_slam"
+      ],
+      "per_sequence": {
+        "00": "10.5804"
+      },
+      "validation_pass": true,
+      "violations": []
+    }
   }
 ]

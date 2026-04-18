@@ -1,0 +1,17 @@
+FROM slam-baselines/ros-base:noetic
+
+# KITTI -> rosbag conversion + IMU timestamp repair, isolated from the
+# individual baseline images so all three baselines (LIO-SAM, FAST-LIO2,
+# hdl_graph_slam) consume the same cached bag.
+#
+# Cache layout (host-side): ~/data/kitti_bags_cache/kitti_${SEQ}_fixed.bag
+# Mounted into this builder at /cache; baseline containers mount the same
+# cache dir at /data/bags read-only.
+
+COPY common/kitti_to_rosbag.py /scripts/kitti_to_rosbag.py
+COPY common/fix_imu_timestamps.py /scripts/fix_imu_timestamps.py
+COPY common/verify_bag_impl.py /scripts/verify_bag_impl.py
+COPY common/prepare_bag.sh /scripts/prepare_bag.sh
+RUN chmod +x /scripts/prepare_bag.sh
+
+ENTRYPOINT ["/scripts/prepare_bag.sh"]

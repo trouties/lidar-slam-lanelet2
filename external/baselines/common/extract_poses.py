@@ -12,6 +12,7 @@ Usage:
         --lidar-bag /tmp/kitti_00.bag \
         --output /output/poses_00.txt
 """
+
 from __future__ import annotations
 
 import argparse
@@ -28,11 +29,14 @@ def quat_to_rotation(qx: float, qy: float, qz: float, qw: float) -> np.ndarray:
     q /= np.linalg.norm(q)
     x, y, z, w = q
 
-    return np.array([
-        [1 - 2*(y*y + z*z), 2*(x*y - z*w),     2*(x*z + y*w)],
-        [2*(x*y + z*w),     1 - 2*(x*x + z*z), 2*(y*z - x*w)],
-        [2*(x*z - y*w),     2*(y*z + x*w),     1 - 2*(x*x + y*y)],
-    ], dtype=np.float64)
+    return np.array(
+        [
+            [1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)],
+            [2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
+            [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)],
+        ],
+        dtype=np.float64,
+    )
 
 
 def extract(

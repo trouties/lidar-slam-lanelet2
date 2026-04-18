@@ -22,6 +22,12 @@ from scripts.run_pipeline import load_config
 from src.data.kitti_loader import KITTIDataset
 from src.optimization.loop_closure import LoopClosureDetector
 
+# Shared default for Scan Context ring-key KNN fan-out. Matches
+# ``configs/default.yaml::loop_closure.scan_context.top_k`` so that the main
+# v2 evaluator and the SUP-02 Round-2 K-sweep operate at the same KNN width
+# when a loaded config omits the key. Keep these in sync.
+SC_DEFAULT_TOP_K = 25
+
 
 def _build_gt_loops(
     gt_poses: list[np.ndarray],
@@ -65,24 +71,145 @@ def _count_tp(
     return tp
 
 
+def _count_gt_coverage(
+    detected_pairs: set[tuple[int, int]],
+    gt_pairs: set[tuple[int, int]],
+    tolerance_frames: int = 20,
+) -> int:
+    """Count GT pairs covered by ≥1 detection within tolerance (GT-side).
+
+    This is the proper numerator for recall: bounded above by ``len(gt_pairs)``,
+    so the resulting ratio stays in [0, 1] regardless of how densely detections
+    cluster around a single GT. ``_count_tp`` above counts the detection side
+    and can exceed ``len(gt_pairs)``.
+    """
+    if not detected_pairs or not gt_pairs:
+        return 0
+    det = np.array(list(detected_pairs))  # (D, 2)
+    gt = np.array(list(gt_pairs))  # (M, 2)
+    # (D, 1, 2) - (1, M, 2) -> (D, M, 2); collapse to per-GT coverage on axis 0.
+    diff = np.abs(det[:, None, :] - gt[None, :, :])
+    match = (diff[:, :, 0] <= tolerance_frames) & (diff[:, :, 1] <= tolerance_frames)
+    return int(match.any(axis=0).sum())
+
+
+def _cluster_gt_pairs(
+    gt_pairs: set[tuple[int, int]],
+    cluster_gap: int = 50,
+) -> list[frozenset[tuple[int, int]]]:
+    """Cluster GT loop pairs into loop events via union-find.
+
+    Two pairs (i1, j1) and (i2, j2) belong to the same event when both
+    |i1 - i2| ≤ cluster_gap and |j1 - j2| ≤ cluster_gap (Chebyshev). This
+    converts the dense per-pair GT into discrete revisit episodes, which
+    is what place-recall counts against (Kim & Kim 2018 scoring style).
+
+    The 50-frame default ≈ 5 s @ 10 Hz on KITTI, a typical dwell time
+    inside a 5 m revisit ball.
+    """
+    if not gt_pairs:
+        return []
+
+    # Sort by i so a sliding window on the i-axis bounds neighbor search.
+    arr = np.array(sorted(gt_pairs), dtype=np.int64)
+    n = len(arr)
+    parent = list(range(n))
+
+    def find(x: int) -> int:
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(a: int, b: int) -> None:
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[ra] = rb
+
+    left = 0
+    for r in range(n):
+        while arr[r, 0] - arr[left, 0] > cluster_gap:
+            left += 1
+        for left_idx in range(left, r):
+            if abs(int(arr[r, 1]) - int(arr[left_idx, 1])) <= cluster_gap:
+                union(left_idx, r)
+
+    buckets: dict[int, list[tuple[int, int]]] = {}
+    for k in range(n):
+        root = find(k)
+        buckets.setdefault(root, []).append((int(arr[k, 0]), int(arr[k, 1])))
+    return [frozenset(v) for v in buckets.values()]
+
+
+def _count_event_tp(
+    detected_pairs: set[tuple[int, int]],
+    gt_events: list[frozenset[tuple[int, int]]],
+    tolerance_frames: int = 20,
+) -> int:
+    """Count loop events with at least one detected pair inside tolerance.
+
+    An event is TP iff any detected pair lies within ±tolerance_frames
+    (Chebyshev) of any GT pair in that event. This is the "place-recall"
+    numerator — each event contributes at most one hit regardless of
+    how many pairs the detector produced inside it.
+    """
+    if not detected_pairs or not gt_events:
+        return 0
+    det = np.array(list(detected_pairs))  # (D, 2)
+    tp_events = 0
+    for event in gt_events:
+        event_arr = np.array(list(event))  # (E, 2)
+        diff = np.abs(det[:, None, :] - event_arr[None, :, :])
+        match = (diff[:, :, 0] <= tolerance_frames) & (diff[:, :, 1] <= tolerance_frames)
+        if match.any():
+            tp_events += 1
+    return tp_events
+
+
 def _eval_detector(
     detector: LoopClosureDetector,
     poses: list[np.ndarray],
     dataset,
     gt_pairs: set[tuple[int, int]],
+    gt_events: list[frozenset[tuple[int, int]]] | None = None,
 ) -> dict:
-    """Evaluate a detector (post-ICP) against GT pairs."""
+    """Evaluate a detector against GT pairs.
+
+    Reports both pre-ICP and post-ICP TP by reading
+    :attr:`LoopClosureDetector.last_pre_icp_candidates` populated during
+    ``detect()``. When ``gt_events`` is provided, also reports
+    place-recall (one hit per event) and per-run ICP verify wall time.
+    """
     closures = detector.detect(poses, dataset=dataset)
-    detected_pairs = {(i, j) for i, j, _ in closures}
-    tp = _count_tp(detected_pairs, gt_pairs)
-    n = len(detected_pairs)
-    return {
+    post_pairs = {(i, j) for i, j, _ in closures}
+    pre_pairs = set(detector.last_pre_icp_candidates)
+
+    post_tp = _count_tp(post_pairs, gt_pairs)
+    pre_tp = _count_tp(pre_pairs, gt_pairs)
+    # GT-side coverage for per_pair_recall — bounded by n_gt.
+    post_gt_cov = _count_gt_coverage(post_pairs, gt_pairs)
+    n = len(post_pairs)
+    n_gt = len(gt_pairs)
+
+    icp_total_ms = detector.icp_verify_timer.summary().get("total_ms", 0.0)
+
+    result: dict = {
         "n_detected": n,
-        "n_gt": len(gt_pairs),
-        "n_tp": tp,
-        "precision": tp / n if n else 0.0,
-        "recall": tp / len(gt_pairs) if gt_pairs else 0.0,
+        "n_gt": n_gt,
+        "n_tp": post_tp,
+        "precision": post_tp / n if n else 0.0,
+        "recall": post_gt_cov / n_gt if n_gt else 0.0,
+        "pre_icp_tp": pre_tp,
+        "post_icp_tp": post_tp,
+        "per_pair_recall": post_gt_cov / n_gt if n_gt else 0.0,
+        "icp_time_s": icp_total_ms / 1000.0,
     }
+    if gt_events is not None:
+        place_tp = _count_event_tp(post_pairs, gt_events)
+        result["n_events"] = len(gt_events)
+        result["place_tp"] = place_tp
+        result["place_recall"] = place_tp / len(gt_events) if gt_events else 0.0
+    return result
 
 
 def _eval_pr_curve_sc(
@@ -111,13 +238,14 @@ def _eval_pr_curve_sc(
     for t in sorted(thresholds):
         filtered = {(i, j) for i, j, d in cands if d < t}
         tp = _count_tp(filtered, gt_pairs)
+        gt_cov = _count_gt_coverage(filtered, gt_pairs)
         n = len(filtered)
         rows.append({
             "threshold": round(t, 2),
             "n_detected": n,
             "n_tp": tp,
             "precision": tp / n if n else 0.0,
-            "recall": tp / len(gt_pairs) if gt_pairs else 0.0,
+            "recall": gt_cov / len(gt_pairs) if gt_pairs else 0.0,
         })
     return rows
 
@@ -165,6 +293,17 @@ def main() -> None:
     parser.add_argument(
         "--gnss-denied", action="store_true",
         help="Test GNSS-denied robustness (artificially drifted poses)",
+    )
+    parser.add_argument(
+        "--k-sweep",
+        nargs="?",
+        const="5,10,15",
+        default=None,
+        help=(
+            "SUP-02 Round 2 max_matches_per_query sweep. "
+            "Pass bare flag for default '5,10,15', or '--k-sweep 5,10' to customize. "
+            "Writes results/sup02_round2_seq{seq}.csv with per-pair + place recall."
+        ),
     )
     args = parser.parse_args()
 
@@ -239,7 +378,7 @@ def main() -> None:
         sc_num_sectors=sc_cfg.get("num_sectors", 60),
         sc_max_range=sc_cfg.get("max_range", 80.0),
         sc_distance_threshold=sc_cfg.get("distance_threshold", 0.4),
-        sc_top_k=sc_cfg.get("top_k", 10),
+        sc_top_k=sc_cfg.get("top_k", SC_DEFAULT_TOP_K),
         sc_query_stride=sc_cfg.get("query_stride", 1),
         sc_max_matches_per_query=sc_cfg.get("max_matches_per_query", 0),
     )
@@ -281,6 +420,71 @@ def main() -> None:
             writer.writeheader()
             writer.writerows(pr_rows)
         print(f"  PR curve written to {pr_path}")
+
+    # --- SUP-02 Round 2 K sweep (optional) ---
+    if args.k_sweep is not None:
+        print("\n--- SUP-02 Round 2 K sweep ---")
+        try:
+            k_values = [int(x.strip()) for x in args.k_sweep.split(",") if x.strip()]
+        except ValueError as e:
+            raise SystemExit(f"Invalid --k-sweep spec {args.k_sweep!r}: {e}")
+        if not k_values:
+            raise SystemExit("--k-sweep must specify at least one K value")
+
+        gt_events = _cluster_gt_pairs(gt_pairs, cluster_gap=50)
+        print(
+            f"  GT events: {len(gt_events)} "
+            f"(from {len(gt_pairs)} pairs, cluster_gap=50 frames)"
+        )
+
+        round2_rows = []
+        for k in k_values:
+            print(f"\n  === K={k} ===")
+            det_k = LoopClosureDetector(
+                distance_threshold=lc_cfg.get("distance_threshold", 15.0),
+                min_frame_gap=min_gap,
+                icp_fitness_threshold=lc_cfg.get("icp_fitness_threshold", 0.9),
+                mode="v2",
+                sc_num_rings=sc_cfg.get("num_rings", 20),
+                sc_num_sectors=sc_cfg.get("num_sectors", 60),
+                sc_max_range=sc_cfg.get("max_range", 80.0),
+                sc_distance_threshold=sc_cfg.get("distance_threshold", 0.4),
+                sc_top_k=sc_cfg.get("top_k", SC_DEFAULT_TOP_K),
+                sc_query_stride=sc_cfg.get("query_stride", 1),
+                sc_max_matches_per_query=k,
+                icp_downsample_voxel=lc_cfg.get("icp_downsample_voxel", 1.0),
+            )
+            r = _eval_detector(det_k, poses, dataset, gt_pairs, gt_events=gt_events)
+            round2_rows.append({
+                "K": k,
+                "pre_icp_tp": r["pre_icp_tp"],
+                "post_icp_tp": r["post_icp_tp"],
+                "per_pair_recall": round(r["per_pair_recall"], 4),
+                "place_recall": round(r["place_recall"], 4),
+                "icp_time_s": round(r["icp_time_s"], 1),
+            })
+            print(
+                f"    pre_icp_tp={r['pre_icp_tp']} post_icp_tp={r['post_icp_tp']} "
+                f"per_pair_R={r['per_pair_recall']:.4f} "
+                f"place_R={r['place_recall']:.4f} "
+                f"ICP={r['icp_time_s']:.0f}s"
+            )
+
+        r2_path = Path("results") / f"sup02_round2_seq{seq}.csv"
+        with r2_path.open("w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=list(round2_rows[0].keys()))
+            writer.writeheader()
+            writer.writerows(round2_rows)
+        print(f"\nRound 2 table written to {r2_path}")
+
+        print("\n| K | pre_icp_tp | post_icp_tp | per_pair_R | place_R | ICP time (s) |")
+        print("|---|---|---|---|---|---|")
+        for row in round2_rows:
+            print(
+                f"| {row['K']} | {row['pre_icp_tp']} | {row['post_icp_tp']} | "
+                f"{row['per_pair_recall']:.4f} | {row['place_recall']:.4f} | "
+                f"{row['icp_time_s']:.0f} |"
+            )
 
     # --- GNSS-denied test (optional) ---
     if args.gnss_denied:
