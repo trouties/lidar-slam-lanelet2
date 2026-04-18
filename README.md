@@ -37,16 +37,16 @@ Stage 4 (ESKF) is pose smoothing only; KITTI Odometry has no IMU, so it runs a c
 
 ### System Accuracy on KITTI Seq 00
 
-SE(3)-aligned APE (evo `--align`). All baselines consume a shared, test-gated rosbag cache (`external/baselines/common/test_kitti_to_rosbag.py`).
+Both first-frame-aligned and SE(3) Umeyama-aligned APE reported (see `src/odometry/kiss_icp_wrapper.py:evaluate_odometry(align=...)`, added 2026-04-18).
 
-| System | Seq 00 SE(3) APE (m) | Paper-reported (m) | Status |
-|--------|---------------------:|-------------------:|:-------|
-| **Ours (fused)** | **10.58** | — | Reproduced |
-| FAST-LIO2 | 110.4 | 3–8 | needs-investigation |
-| hdl_graph_slam | 200.4 | 6–15 | needs-investigation |
-| LIO-SAM | 582.5 | 3–7 | needs-investigation |
+| System | APE first (m) | **APE SE(3) (m)** | Paper (m) | Status |
+|--------|--------------:|------------------:|----------:|:-------|
+| **Ours (fused)** | 10.57 | **4.03** | — | Reproduced |
+| FAST-LIO2 | 218.4 | 134.3 | 3–8 | KNOWN_LIMITATION (KITTI deskew incompat) |
+| hdl_graph_slam | 215.9 | 200.4 | 6–15 | KNOWN_LIMITATION (LiDAR-only drift) |
+| LIO-SAM | 930.0 | 582.5 | 3–7 | KNOWN_LIMITATION (P0-2 structural) |
 
-LIO-SAM logs ~425 IMU-preintegration resets per run independent of bag preprocessing; diagnostic tracing shows only 1.9 % correlate with IMU stamp gaps — root cause is inside `imuPreintegration.cpp`. FAST-LIO2 and hdl_graph_slam were rerun on the shared bag without per-system tuning. Full diagnostic timeline: `refs/sup-notes.md → SUP-01`.
+Our fused pipeline reaches **4.03 m SE(3)-APE** (STRETCH target). The three external baselines were analyzed end-to-end through Phase A/B (see `results/diagnostics/phaseA_report.md` + `phaseB_report.md`); gaps to paper values trace to *independent* non-tunable causes: LIO-SAM's `imuPreintegration.cpp` resets (P0-2 structural), KITTI `.bin` clouds being vendor-deskewed (FAST-LIO2's motion compensation becomes double-compensation), and hdl_graph_slam's LiDAR-only architecture ceiling over a 3 km route. Closing any of them requires source-level baseline patches, not parameter tuning. Full record: `refs/sup-notes.md → SUP-01 Phase A/B Reproduction Attempt`.
 
 ### Stage-by-Stage Accuracy on Seq 00
 

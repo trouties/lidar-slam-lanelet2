@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import json
 from pathlib import Path
 
 import numpy as np
@@ -35,6 +36,49 @@ from src.optimization.loop_closure import LoopClosureDetector
 from src.optimization.pose_graph import PoseGraphOptimizer
 
 BENCHMARKS_DIR = Path("benchmarks")
+DIAGNOSTICS_DIR = Path("results") / "diagnostics"
+
+
+def _dual_eval(est_poses, gt_poses) -> tuple[dict, dict]:
+    """Compute metrics under both first-frame and SE(3) Umeyama alignment."""
+    n = min(len(est_poses), len(gt_poses))
+    est = list(est_poses[:n])
+    gt = list(gt_poses[:n])
+    first = evaluate_odometry(est, gt, align="first")
+    se3 = evaluate_odometry(est, gt, align="se3")
+    return first, se3
+
+
+def _audit_baseline_frame(system: str, sequence: str, bl_poses, gt_velo) -> None:
+    """Write a small JSON diagnostic comparing baseline T0 + step-10 motion vs GT."""
+    DIAGNOSTICS_DIR.mkdir(parents=True, exist_ok=True)
+    out = DIAGNOSTICS_DIR / f"frame_audit_{system}_{sequence}.json"
+    n = min(len(bl_poses), len(gt_velo), 11)
+    if n < 2:
+        return
+    T0_bl = np.asarray(bl_poses[0])
+    T10_bl = np.asarray(bl_poses[min(10, n - 1)])
+    T0_gt = np.asarray(gt_velo[0])
+    T10_gt = np.asarray(gt_velo[min(10, n - 1)])
+    rel_bl = np.linalg.inv(T0_bl) @ T10_bl
+    rel_gt = np.linalg.inv(T0_gt) @ T10_gt
+    diag = {
+        "system": system,
+        "sequence": sequence,
+        "T0_baseline_translation_m": [float(x) for x in T0_bl[:3, 3]],
+        "T0_baseline_translation_norm_m": float(np.linalg.norm(T0_bl[:3, 3])),
+        "step10_baseline_dtrans_m": [float(x) for x in rel_bl[:3, 3]],
+        "step10_baseline_dtrans_norm_m": float(np.linalg.norm(rel_bl[:3, 3])),
+        "step10_gt_dtrans_m": [float(x) for x in rel_gt[:3, 3]],
+        "step10_gt_dtrans_norm_m": float(np.linalg.norm(rel_gt[:3, 3])),
+        "step10_direction_dot_product": float(
+            np.dot(rel_bl[:3, 3], rel_gt[:3, 3])
+            / max(np.linalg.norm(rel_bl[:3, 3]) * np.linalg.norm(rel_gt[:3, 3]), 1e-9)
+        ),
+    }
+    with out.open("w") as f:
+        json.dump(diag, f, indent=2)
+    print(f"  Wrote frame audit: {out}")
 
 # Expected structure for external baseline results:
 #   external/baselines/{system}/results/poses_{seq}.txt
@@ -205,9 +249,28 @@ def run_comparison(
             cache = LayeredCache(root=cache_cfg.get("root", "cache/kitti"), sequence=seq)
 
         summary = _run_own_pipeline(config, seq, out_dir, cache=cache)
+
+        # Own fused: reload cam-frame poses and compute SE(3)-aligned APE against
+        # cam-frame GT (alignment is frame-invariant, so using either frame gives
+        # the same aligned RMSE as long as both trajectories share it).
+        own_fused_se3: dict | None = None
+        fused_pose_path = out_dir / f"poses_fused_{seq}.txt"
+        if fused_pose_path.exists() and dataset.poses is not None:
+            try:
+                fused_cam = load_poses_kitti_format(fused_pose_path)
+                _, se3_m = _dual_eval(fused_cam, list(dataset.poses))
+                own_fused_se3 = {
+                    "ape_rmse": float(se3_m["ape"]["rmse"]),
+                    "ape_mean": float(se3_m["ape"]["mean"]),
+                    "rpe_rmse": float(se3_m["rpe"]["rmse"]),
+                }
+            except Exception as e:
+                print(f"  [warn] Own SE3 re-eval failed: {e}")
+
         for stage_label in ["odometry", "optimized", "fused"]:
             m = summary.get("metrics", {}).get(stage_label, {})
             if m:
+                se3_row = own_fused_se3 if stage_label == "fused" else None
                 accuracy_rows.append({
                     "system": "own",
                     "sequence": seq,
@@ -215,6 +278,9 @@ def run_comparison(
                     "ape_rmse": f"{m['ape_rmse']:.4f}" if "ape_rmse" in m else "",
                     "ape_mean": f"{m['ape_mean']:.4f}" if "ape_mean" in m else "",
                     "rpe_rmse": f"{m['rpe_rmse']:.4f}" if "rpe_rmse" in m else "",
+                    "ape_rmse_se3": f"{se3_row['ape_rmse']:.4f}" if se3_row else "N/A",
+                    "ape_mean_se3": f"{se3_row['ape_mean']:.4f}" if se3_row else "N/A",
+                    "rpe_rmse_se3": f"{se3_row['rpe_rmse']:.4f}" if se3_row else "N/A",
                     "source": "own_run",
                 })
 
@@ -259,6 +325,9 @@ def run_comparison(
                     "ape_rmse": "FAIL",
                     "ape_mean": "FAIL",
                     "rpe_rmse": "FAIL",
+                    "ape_rmse_se3": "FAIL",
+                    "ape_mean_se3": "FAIL",
+                    "rpe_rmse_se3": "FAIL",
                     "source": "FAIL",
                 })
                 gnss_rows.append({
@@ -272,19 +341,27 @@ def run_comparison(
                 })
                 continue
 
-            # Evaluate baseline
+            # Evaluate baseline under both alignments
             if gt_velo is not None:
-                n = min(len(bl_poses), len(gt_velo))
-                metrics = evaluate_odometry(bl_poses[:n], gt_velo[:n])
+                _audit_baseline_frame(bl, seq, bl_poses, gt_velo)
+                first_m, se3_m = _dual_eval(bl_poses, gt_velo)
                 accuracy_rows.append({
                     "system": bl,
                     "sequence": seq,
                     "stage": "optimized",
-                    "ape_rmse": f"{metrics['ape']['rmse']:.4f}",
-                    "ape_mean": f"{metrics['ape']['mean']:.4f}",
-                    "rpe_rmse": f"{metrics['rpe']['rmse']:.4f}",
+                    "ape_rmse": f"{first_m['ape']['rmse']:.4f}",
+                    "ape_mean": f"{first_m['ape']['mean']:.4f}",
+                    "rpe_rmse": f"{first_m['rpe']['rmse']:.4f}",
+                    "ape_rmse_se3": f"{se3_m['ape']['rmse']:.4f}",
+                    "ape_mean_se3": f"{se3_m['ape']['mean']:.4f}",
+                    "rpe_rmse_se3": f"{se3_m['rpe']['rmse']:.4f}",
                     "source": "baseline_run",
                 })
+                print(
+                    f"  APE_first={first_m['ape']['rmse']:.3f} m "
+                    f"APE_se3={se3_m['ape']['rmse']:.3f} m "
+                    f"(Δ={first_m['ape']['rmse'] - se3_m['ape']['rmse']:+.3f})"
+                )
 
     # Write CSVs
     _write_csv(BENCHMARKS_DIR / "accuracy_table.csv", accuracy_rows)
@@ -365,6 +442,10 @@ def _validate_tables() -> list[str]:
                 continue
             for row_idx, row in enumerate(reader, 1):
                 for col, val in row.items():
+                    if val == "N/A":
+                        # Intentional placeholder (e.g., SE(3)-aligned metrics
+                        # not computed for non-fused Own stages). Not a violation.
+                        continue
                     if val is None or val == "":
                         violations.append(f"EMPTY: {csv_name} row {row_idx} col '{col}'")
                     elif val == "nan":

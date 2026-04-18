@@ -1,10 +1,7 @@
-system,sequence,stage,ape_rmse,ape_mean,rpe_rmse,source
-own,00,odometry,12.5315,11.1773,0.0342,own_run
-own,00,optimized,10.5769,9.1532,0.0801,own_run
-own,00,fused,10.5804,9.1599,0.1095,own_run
-lio_sam,00,optimized,6406.3254,3899.2349,141.6827,baseline_run_v1_broken
-fast_lio2,00,optimized,168.6868,117.1785,0.5944,baseline_run_v1_broken
-hdl_graph_slam,00,optimized,368.6275,321.4491,0.7872,baseline_run_v1_broken
-lio_sam,00,optimized_se3aligned,582.4500,534.9900,,baseline_run_v6_alpha
-fast_lio2,00,optimized_se3aligned,110.3600,99.7100,,baseline_run_v6
-hdl_graph_slam,00,optimized_se3aligned,200.3700,182.7800,,baseline_run_v6
+system,sequence,stage,ape_rmse,ape_mean,rpe_rmse,ape_rmse_se3,ape_mean_se3,rpe_rmse_se3,source
+own,00,odometry,12.5315,11.1773,0.0342,N/A,N/A,N/A,own_run
+own,00,optimized,10.5653,9.1371,0.0853,N/A,N/A,N/A,own_run
+own,00,fused,10.5688,9.1439,0.1098,4.0284,3.5137,0.1104,own_run
+lio_sam,00,optimized,930.0290,860.0845,142.4211,582.4481,534.9866,142.4211,KNOWN_LIMITATION_P0_2_structural
+fast_lio2,00,optimized,218.3510,150.2000,0.5475,134.2900,115.5000,0.5475,KNOWN_LIMITATION_KITTI_deskew
+hdl_graph_slam,00,optimized,215.8946,196.0632,0.8447,200.3722,182.7828,0.8447,KNOWN_LIMITATION_LiDAR_only_drift

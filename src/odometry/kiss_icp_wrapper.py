@@ -167,12 +167,17 @@ def transform_poses_to_camera_frame(
 def evaluate_odometry(
     est_poses: list[np.ndarray],
     gt_poses: list[np.ndarray] | np.ndarray,
+    align: str = "first",
 ) -> dict[str, dict]:
     """Compute APE and RPE metrics using the evo toolkit.
 
     Args:
         est_poses: Estimated poses as list of 4x4 arrays.
         gt_poses: Ground truth poses as list of 4x4 arrays or (M, 4, 4) array.
+        align: Alignment strategy before metric computation.
+            - "first": no alignment (evo default, assumes frames share origin)
+            - "se3":   Umeyama SE(3) alignment (rotation+translation, no scale)
+            - "sim3":  Umeyama Sim(3) alignment (rotation+translation+scale)
 
     Returns:
         Dictionary with 'ape' and 'rpe' keys, each mapping to a statistics dict
@@ -185,6 +190,13 @@ def evaluate_odometry(
 
     traj_est = PosePath3D(poses_se3=list(est_poses))
     traj_ref = PosePath3D(poses_se3=gt_list)
+
+    if align == "se3":
+        traj_est.align(traj_ref, correct_scale=False)
+    elif align == "sim3":
+        traj_est.align(traj_ref, correct_scale=True)
+    elif align != "first":
+        raise ValueError(f"Unknown align mode: {align!r}; expected 'first'|'se3'|'sim3'")
 
     ape = APE(PoseRelation.translation_part)
     ape.process_data((traj_ref, traj_est))

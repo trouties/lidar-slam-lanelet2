@@ -16,11 +16,66 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
 import numpy as np
 import rosbag
+
+
+def load_frame_tf(path: str) -> np.ndarray:
+    """Load a 4x4 SE(3) transform from a text file.
+
+    Accepts either 16 floats (4x4) or 12 floats (3x4 row-major, last row assumed [0,0,0,1]).
+    """
+    data = np.loadtxt(path).flatten()
+    if data.size == 16:
+        T = data.reshape(4, 4)
+    elif data.size == 12:
+        T = np.eye(4)
+        T[:3, :] = data.reshape(3, 4)
+    else:
+        raise ValueError(f"frame-tf file {path} has {data.size} floats; expected 12 or 16")
+    return T
+
+
+def write_audit(
+    path: str,
+    poses: list[np.ndarray],
+    n_matched: int,
+    max_dt: float,
+    frame_tf_path: str | None,
+) -> None:
+    """Write a small JSON diagnostic summarizing the extracted trajectory."""
+    sample_idx = [0, min(1, len(poses) - 1), min(10, len(poses) - 1), len(poses) - 1]
+    sample_idx = sorted(set(i for i in sample_idx if 0 <= i < len(poses)))
+    T0_inv = np.linalg.inv(poses[0]) if poses else np.eye(4)
+    samples = []
+    for i in sample_idx:
+        T = poses[i]
+        rel = T0_inv @ T
+        samples.append({
+            "idx": int(i),
+            "abs_translation_m": [float(x) for x in T[:3, 3]],
+            "abs_translation_norm_m": float(np.linalg.norm(T[:3, 3])),
+            "rel_to_first_translation_m": [float(x) for x in rel[:3, 3]],
+            "rel_to_first_translation_norm_m": float(np.linalg.norm(rel[:3, 3])),
+        })
+    first_t_norm = float(np.linalg.norm(poses[0][:3, 3])) if poses else 0.0
+    audit = {
+        "n_poses": len(poses),
+        "n_matched": int(n_matched),
+        "max_dt_s": float(max_dt),
+        "frame_tf_path": frame_tf_path,
+        "first_pose_abs_translation_norm_m": first_t_norm,
+        "samples": samples,
+    }
+    out = Path(path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    with out.open("w") as f:
+        json.dump(audit, f, indent=2)
+    print(f"Wrote audit to {path}")
 
 
 def quat_to_rotation(qx: float, qy: float, qz: float, qw: float) -> np.ndarray:
@@ -45,6 +100,8 @@ def extract(
     lidar_bag_path: str,
     output_path: str,
     max_dt: float = 0.15,
+    frame_tf_path: str | None = None,
+    audit_out: str | None = None,
 ) -> None:
     """Extract poses aligned to LiDAR frame timestamps.
 
@@ -54,6 +111,11 @@ def extract(
         lidar_bag_path: Path to input KITTI bag (for LiDAR timestamps).
         output_path: Output KITTI pose file path.
         max_dt: Maximum time difference (s) for matching odom to LiDAR frame.
+        frame_tf_path: Optional path to a 4x4 SE(3) TXT T. Each pose is
+            post-processed as pose_new = T^{-1} @ pose_old @ T, which
+            re-expresses the trajectory from the odometry topic's native frame
+            into the target frame (e.g., /map -> /velodyne).
+        audit_out: Optional path to write a small JSON diagnostic.
     """
     # Collect LiDAR timestamps
     print(f"Reading LiDAR timestamps from {lidar_bag_path}...")
@@ -102,6 +164,13 @@ def extract(
 
     print(f"  Matched {n_matched}/{len(lidar_stamps)} frames (max_dt={max_dt}s)")
 
+    # Apply frame transform (source frame -> target frame) if requested.
+    if frame_tf_path:
+        T_frame = load_frame_tf(frame_tf_path)
+        T_frame_inv = np.linalg.inv(T_frame)
+        poses_out = [T_frame_inv @ P @ T_frame for P in poses_out]
+        print(f"  Applied frame-tf from {frame_tf_path}")
+
     # Validate: first pose should be approximately identity
     first_t = np.linalg.norm(poses_out[0][:3, 3])
     if first_t > 5.0:
@@ -117,6 +186,9 @@ def extract(
 
     print(f"Wrote {len(poses_out)} poses to {output_path}")
 
+    if audit_out:
+        write_audit(audit_out, poses_out, n_matched, max_dt, frame_tf_path)
+
 
 def main():
     parser = argparse.ArgumentParser(description="Extract KITTI poses from ROS odom bag")
@@ -125,6 +197,14 @@ def main():
     parser.add_argument("--lidar-bag", required=True, help="Input KITTI bag (for timestamps)")
     parser.add_argument("--output", required=True, help="Output KITTI pose file")
     parser.add_argument("--max-dt", type=float, default=0.15, help="Max time offset (s)")
+    parser.add_argument(
+        "--frame-tf", type=str, default=None,
+        help="Optional 4x4 SE(3) TXT to re-express trajectory (pose_new = T^-1 @ pose @ T)",
+    )
+    parser.add_argument(
+        "--audit-out", type=str, default=None,
+        help="Optional JSON path for frame/match diagnostic output",
+    )
     args = parser.parse_args()
 
     extract(
@@ -133,6 +213,8 @@ def main():
         lidar_bag_path=args.lidar_bag,
         output_path=args.output,
         max_dt=args.max_dt,
+        frame_tf_path=args.frame_tf,
+        audit_out=args.audit_out,
     )
 
 

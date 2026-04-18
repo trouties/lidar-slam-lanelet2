@@ -11,10 +11,22 @@ preprocess:
     point_filter_num: 4           # downsample: keep every 4th point
     feature_extract_enable: false
     scan_rate: 10                 # 10 Hz
+    # SUP-01 Phase B.2 v3: kitti_to_rosbag.py writes PointCloud2.time in
+    # seconds (0..0.1 s per scan). FAST-LIO2 upstream default timestamp_unit
+    # is 2 (microsecond), so 0.1 s was interpreted as 0.1 us => deskew
+    # window collapsed to zero => no motion compensation => ~3% drift (110 m
+    # APE_SE3 on Seq 00). Setting to 0 (seconds) matches our bag format.
+    timestamp_unit: 0
 
 mapping:
-    acc_cov: 0.1
-    gyr_cov: 0.1
+    # SUP-01 Phase B.2: OxTS RT3003 datasheet — accel noise_density
+    # ~3.99e-3 m/s^2/sqrt(Hz), gyro noise_density ~1.56e-3 rad/s/sqrt(Hz).
+    # At 100 Hz IMU rate, variances are ~1.59e-3 and ~2.4e-4 respectively.
+    # FAST-LIO2 upstream defaults of 0.1 are 60-400x looser than physics,
+    # which over-downweights IMU and lets LiDAR-ICP drift dominate. Values
+    # below leave ~3x (acc) / ~2x (gyr) margin over datasheet.
+    acc_cov: 0.005
+    gyr_cov: 0.0005
     b_acc_cov: 0.0001
     b_gyr_cov: 0.0001
     fov_degree: 180

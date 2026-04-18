@@ -204,6 +204,36 @@ def audit_fast_lio2() -> tuple[Report, list[float] | None, list[float] | None]:
     else:
         r.fail("extrinsic_T", "missing or not 3 floats")
 
+    # SUP-01 Phase B.2: IMU covariance magnitude sanity check.
+    # OxTS RT3003 datasheet noise_density ~3.99e-3 m/s^2/sqrt(Hz), at 100 Hz
+    # IMU rate: variance ~= (3.99e-3)^2 * 100 = 1.59e-3. FAST-LIO2 default 0.1
+    # is ~60x looser — over-downweights IMU, lets LiDAR-ICP drift dominate
+    # (Seq 00 APE_SE3 drop 110 m → ? after fix, see refs/sup-notes.md).
+    for key, reference, label in [
+        ("acc_cov", 1.6e-3, "OxTS RT3003 accel var"),
+        ("gyr_cov", 2.4e-4, "OxTS RT3003 gyro var"),
+    ]:
+        raw = _extract_yaml_scalar(text, key)
+        if raw is None:
+            r.warn(key, "not set in kitti.yaml (using FAST-LIO2 default)")
+            continue
+        try:
+            v = float(raw)
+        except ValueError:
+            r.warn(key, f"could not parse {raw!r}")
+            continue
+        ratio = v / reference
+        if ratio < 0.1:
+            r.warn(key, f"{v:.4g} is {ratio:.2f}x {label} — very tight, risk of divergence")
+        elif ratio <= 10:
+            r.pass_(key, f"{v:.4g} ({ratio:.1f}x {label})")
+        else:
+            r.fail(
+                key,
+                f"{v:.4g} is {ratio:.0f}x {label} ({reference:.2e}). IMU will be "
+                f"over-downweighted; expect LiDAR-ICP drift (SUP-01 Phase B.2).",
+            )
+
     # Launch file: the critical "extrinsic_T override" bug that nullifies 0.8 m offset
     if not launch_path.exists():
         r.fail("launch file", f"missing: {launch_path}")

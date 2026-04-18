@@ -1,8 +1,8 @@
 system,sequence,stage,p50_ms,p95_ms,max_ms,mean_ms
-own,00,stage3,1316323.2,1316323.2,1316323.2,1316323.2
-own,00,stage3_sc_query,124.7,165.0,269.0,119.2
-own,00,stage3_icp_verify,78.8,198.6,565.2,82.0
-own,00,stage3_graph_optimize,618.3,618.3,618.3,618.3
-own,00,stage4,1058.2,1058.2,1058.2,1058.2
+own,00,stage3,926350.9,926350.9,926350.9,926350.9
+own,00,stage3_sc_query,58.6,73.1,108.7,55.0
+own,00,stage3_icp_verify,74.5,172.0,518.7,75.7
+own,00,stage3_graph_optimize,587.4,587.4,587.4,587.4
+own,00,stage4,985.9,985.9,985.9,985.9
 own,00,stage4b,635107.8,635107.8,635107.8,635107.8
 own,00,stage5,44470.8,44470.8,44470.8,44470.8

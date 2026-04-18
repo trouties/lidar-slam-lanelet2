@@ -1,10 +1,17 @@
 <launch>
   <param name="use_sim_time" value="true" />
 
-  <!-- Load FAST-LIO2 velodyne config, then override for KITTI HDL-64E -->
+  <!-- Load FAST-LIO2 velodyne defaults first, then our KITTI overrides.
+       SUP-01 Phase B.2 bug discovery: previously only velodyne.yaml was
+       loaded, so kitti.yaml (acc_cov 0.005, extrinsic_T from KITTI Raw
+       calib, imu_topic /imu/data) was effectively ignored — FAST-LIO2 ran
+       on upstream Livox defaults. Adding kitti.yaml as a second rosparam
+       load makes our overrides authoritative (later load wins). -->
   <rosparam command="load" file="$(find fast_lio)/config/velodyne.yaml" />
+  <rosparam command="load" file="/config/kitti.yaml" />
 
-  <!-- KITTI HDL-64E overrides -->
+  <!-- KITTI HDL-64E param-level overrides (redundant with kitti.yaml but
+       left for documentation; <param> beats <rosparam> in ROS precedence). -->
   <param name="preprocess/scan_line" type="int" value="64" />
   <param name="preprocess/blind" type="double" value="2.0" />
   <param name="publish/path_en" type="bool" value="true" />

@@ -707,5 +707,36 @@
         "overall": true
       }
     }
+  },
+  {
+    "run_id": "ac044bba5ea3",
+    "task": "SUP-01",
+    "git_sha": "7cebc27ecb6a43895c7df0ddea7d7d05937a1b1a",
+    "config_hash": "ea9430b45ffa7945",
+    "timestamp": "2026-04-18T14:55:08.953616+00:00",
+    "sequences": [
+      "00"
+    ],
+    "artifacts": [
+      "benchmarks/accuracy_table.csv",
+      "benchmarks/latency_table.csv",
+      "benchmarks/robustness_gnss_denied.csv"
+    ],
+    "metrics": {
+      "n_accuracy_rows": 6,
+      "n_latency_rows": 7,
+      "n_gnss_rows": 1,
+      "baselines_attempted": [
+        "own",
+        "lio_sam",
+        "fast_lio2",
+        "hdl_graph_slam"
+      ],
+      "per_sequence": {
+        "00": "10.5688"
+      },
+      "validation_pass": true,
+      "violations": []
+    }
   }
 ]
