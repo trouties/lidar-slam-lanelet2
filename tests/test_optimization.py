@@ -317,6 +317,134 @@ def test_loop_closure_reduces_drift():
 
 
 # ---------------------------------------------------------------------------
+# Tests: Switchable Constraints (robust kernel on loop closures)
+# ---------------------------------------------------------------------------
+
+
+def _optimize_with_outlier(
+    robust_kernel: str | None, robust_scale: float = 1.0, outlier_offset: float = 50.0
+) -> tuple[list[np.ndarray], list[np.ndarray]]:
+    """Build a straight-line graph with one bogus loop closure, optimize.
+
+    Returns ``(optimized, clean)`` so callers can score APE against the
+    ground-truth clean trajectory. The bogus closure asserts that frame
+    ``n-1`` coincides with frame ``0`` offset by ``outlier_offset`` in y
+    — a ~50 m lateral jump that is geometrically inconsistent with the
+    correct between-factors.
+    """
+    import gtsam
+
+    n = 12
+    clean = _make_straight_trajectory(n, step=1.0)
+    opt = PoseGraphOptimizer(robust_kernel=robust_kernel, robust_scale=robust_scale)
+    opt.build_graph(clean)
+
+    relative_bogus = np.eye(4)
+    relative_bogus[1, 3] = outlier_offset
+    opt.add_loop_closure(0, n - 1, relative_bogus)
+
+    # Re-insert clean initials (build_graph already did this; keep explicit).
+    opt.initial_values = gtsam.Values()
+    for i, p in enumerate(clean):
+        opt.initial_values.insert(i, gtsam.Pose3(p))
+
+    return opt.optimize(), clean
+
+
+def test_robust_kernel_none_is_bitexact():
+    """robust_kernel=None must be bit-exact equivalent to legacy default ctor."""
+    import gtsam
+
+    clean = _make_straight_trajectory(10, step=1.0)
+
+    legacy = PoseGraphOptimizer()
+    legacy.build_graph(clean)
+    rel = np.eye(4)
+    rel[0, 3] = 9.0  # consistent loop
+    legacy.add_loop_closure(0, 9, rel)
+    poses_legacy = legacy.optimize()
+
+    new = PoseGraphOptimizer(robust_kernel=None, robust_scale=1.0)
+    new.build_graph(clean)
+    new.initial_values = gtsam.Values()
+    for i, p in enumerate(clean):
+        new.initial_values.insert(i, gtsam.Pose3(p))
+    new.add_loop_closure(0, 9, rel)
+    poses_new = new.optimize()
+
+    for a, b in zip(poses_legacy, poses_new):
+        np.testing.assert_allclose(a, b, atol=1e-10)
+
+
+def test_robust_kernel_suppresses_outlier_closure():
+    """A bogus 50 m closure: Gaussian bends trajectory, robust kernels down-weight it.
+
+    Measure APE at the inlier poses (skip the two closure endpoints
+    whose residual is the outlier). Robust optimizers should keep the
+    straight-line interior much closer to the clean ground truth than
+    the pure-Gaussian optimizer.
+    """
+    gaussian_poses, clean = _optimize_with_outlier(None)
+    inlier_idx = list(range(1, len(clean) - 1))
+
+    gaussian_err = np.mean(
+        [np.linalg.norm(gaussian_poses[k][:3, 3] - clean[k][:3, 3]) for k in inlier_idx]
+    )
+
+    kernels = [("huber", 1.0), ("cauchy", 1.0), ("gm", 1.0), ("dcs", 1.0)]
+    robust_errs = {}
+    for name, scale in kernels:
+        poses, _ = _optimize_with_outlier(name, scale)
+        err = np.mean(
+            [np.linalg.norm(poses[k][:3, 3] - clean[k][:3, 3]) for k in inlier_idx]
+        )
+        robust_errs[name] = err
+
+    # At least three of the four robust kernels must slash interior APE to
+    # well below half of the Gaussian baseline.
+    improvements = [name for name, err in robust_errs.items() if err < 0.5 * gaussian_err]
+    assert len(improvements) >= 3, (
+        f"Gaussian inlier err={gaussian_err:.3f}, robust errs={robust_errs}. "
+        f"Only {improvements} beat the 0.5× threshold."
+    )
+
+
+def test_unknown_robust_kernel_raises():
+    """Nonsense kernel name must fail loudly rather than silently no-op."""
+    import pytest
+
+    clean = _make_straight_trajectory(5, step=1.0)
+    opt = PoseGraphOptimizer(robust_kernel="magicspell", robust_scale=1.0)
+    opt.build_graph(clean)
+    rel = np.eye(4)
+    rel[0, 3] = 4.0
+    with pytest.raises(ValueError, match="unknown robust kernel"):
+        opt.add_loop_closure(0, 4, rel)
+
+
+def test_cluster_gt_pairs_event_count_monotone():
+    """Larger cluster_gap must not increase the event count (union-find monotonicity)."""
+    from scripts.eval_loop_closure_pr import _cluster_gt_pairs
+
+    # Synthetic GT: 3 clusters of 5 nearby pairs each, 200 frames apart.
+    pairs = set()
+    for c in range(3):
+        base_i = c * 200
+        base_j = base_i + 1000
+        for d in range(5):
+            pairs.add((base_i + d, base_j + d))
+
+    counts = {g: len(_cluster_gt_pairs(pairs, cluster_gap=g)) for g in (5, 50, 100, 500)}
+    # At gap ≥ 5 neighbors merge within a cluster → 3 events; gap=500 also
+    # cannot merge between clusters because they are 200 frames apart but
+    # only on the i axis; however inter-cluster Chebyshev distance is 200
+    # which exceeds gap=100 but is dominated by gap=500. Either way:
+    # monotone non-increase holds.
+    assert counts[5] >= counts[50] >= counts[100] >= counts[500], counts
+    assert counts[5] == 3
+
+
+# ---------------------------------------------------------------------------
 # Tests: LoopClosureDetector
 # ---------------------------------------------------------------------------
 

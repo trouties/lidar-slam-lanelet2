@@ -30,6 +30,54 @@ def _noise_from_override(
     return gtsam.noiseModel.Diagonal.Sigmas(np.array([*s[3:], *s[:3]]))
 
 
+def _make_robust(
+    kernel: str | None,
+    scale: float,
+    base: gtsam.noiseModel.Base,
+) -> gtsam.noiseModel.Base:
+    """Wrap a Gaussian base noise model in a robust M-estimator kernel.
+
+    Implements "switchable constraints" style outlier robustness on loop
+    closure factors via GTSAM's built-in robust kernel wrappers. ``DCS``
+    is the Agarwal et al. 2013 reformulation of Sünderhauf & Protzel 2012
+    switchable constraints that lives entirely inside the noise model
+    (no per-edge switch variable), so it is the ship-first Tier A path.
+
+    Args:
+        kernel: One of ``None``, ``"none"``, ``"huber"``, ``"cauchy"``,
+            ``"gm"`` / ``"gemanmcclure"``, ``"dcs"``. Case-insensitive.
+        scale: Kernel scale parameter — Huber/Cauchy ``k``, Geman–McClure
+            ``c``, DCS ``phi``. Ignored when ``kernel`` is falsey.
+        base: Underlying Gaussian noise model (typically
+            :class:`noiseModel.Diagonal`).
+
+    Returns:
+        A :class:`noiseModel.Robust` wrapping ``base`` with the requested
+        M-estimator, or ``base`` unchanged when ``kernel`` is disabled.
+    """
+    if kernel is None:
+        return base
+    key = kernel.lower()
+    if key in ("", "none"):
+        return base
+
+    m_est = gtsam.noiseModel.mEstimator
+    if key == "huber":
+        estimator = m_est.Huber.Create(float(scale))
+    elif key == "cauchy":
+        estimator = m_est.Cauchy.Create(float(scale))
+    elif key in ("gm", "gemanmcclure"):
+        estimator = m_est.GemanMcClure.Create(float(scale))
+    elif key == "dcs":
+        estimator = m_est.DCS.Create(float(scale))
+    else:
+        raise ValueError(
+            f"unknown robust kernel: {kernel!r} "
+            "(expected none|huber|cauchy|gm|gemanmcclure|dcs)"
+        )
+    return gtsam.noiseModel.Robust.Create(estimator, base)
+
+
 class PoseGraphOptimizer:
     """GTSAM-based pose graph optimizer.
 
@@ -41,6 +89,8 @@ class PoseGraphOptimizer:
         self,
         odom_sigmas: list[float] | None = None,
         prior_sigmas: list[float] | None = None,
+        robust_kernel: str | None = None,
+        robust_scale: float = 1.0,
     ) -> None:
         """Initialize optimizer.
 
@@ -50,6 +100,13 @@ class PoseGraphOptimizer:
                 [rx,ry,rz,tx,ty,tz]. Defaults to [0.1,0.1,0.1,0.01,0.01,0.01].
             prior_sigmas: 6-element [tx,ty,tz,rx,ry,rz] noise sigmas for
                 the prior factor on pose 0. Defaults to tight values.
+            robust_kernel: Optional M-estimator robust kernel wrapping
+                loop closure noise only (odometry + prior stay Gaussian).
+                ``None`` / ``"none"`` preserves legacy pure-Gaussian
+                behavior. See :func:`_make_robust` for supported names.
+            robust_scale: Kernel scale parameter passed through to
+                :func:`_make_robust`. Only read when ``robust_kernel`` is
+                an active kernel name.
         """
         if odom_sigmas is None:
             odom_sigmas = [0.1, 0.1, 0.1, 0.01, 0.01, 0.01]
@@ -63,6 +120,9 @@ class PoseGraphOptimizer:
         self.prior_noise = gtsam.noiseModel.Diagonal.Sigmas(
             np.array([*prior_sigmas[3:], *prior_sigmas[:3]])
         )
+
+        self.robust_kernel = robust_kernel
+        self.robust_scale = float(robust_scale)
 
         self.graph = gtsam.NonlinearFactorGraph()
         self.initial_values = gtsam.Values()
@@ -159,6 +219,10 @@ class PoseGraphOptimizer:
             noise = gtsam.noiseModel.Diagonal.Sigmas(np.array([*sigmas[3:], *sigmas[:3]]))
         else:
             noise = self.odom_noise
+
+        # Robust M-estimator wrapping is loop-closure-only; odometry stays
+        # strict Gaussian so normal between-factor geometry is preserved.
+        noise = _make_robust(self.robust_kernel, self.robust_scale, noise)
 
         self.graph.add(gtsam.BetweenFactorPose3(i, j, gtsam.Pose3(relative_pose), noise))
 

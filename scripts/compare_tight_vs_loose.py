@@ -81,6 +81,10 @@ def _run_tight(
     )
     closures = detector.detect(poses, dataset=dataset)
 
+    _rk = lc_cfg.get("robust_kernel")
+    if isinstance(_rk, str) and _rk.lower() in ("", "none"):
+        _rk = None
+
     opt_poses, bias_history, _ = build_tight_coupled_graph(
         poses=poses,
         imu_acc=imu_acc,
@@ -97,6 +101,8 @@ def _run_tight(
         gyro_noise_sigma=imu_cfg.get("gyro_noise_sigma", 0.5),
         accel_bias_sigma=imu_cfg.get("accel_bias_sigma", 0.1),
         gyro_bias_sigma=imu_cfg.get("gyro_bias_sigma", 0.01),
+        robust_kernel=_rk,
+        robust_scale=float(lc_cfg.get("robust_scale", 1.0)),
     )
     return opt_poses, bias_history
 

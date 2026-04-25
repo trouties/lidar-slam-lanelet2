@@ -566,14 +566,29 @@ def run_pipeline_cached(
             if verbose:
                 print(f"  Detected {len(closures)} loop closure(s)")
             with timer_s3_go:
+                # Loop-closure robust kernel (Switchable Constraints Tier A).
+                # Default kernel=none keeps legacy pure-Gaussian behavior
+                # and is hash-stripped by the optimized cache shim so
+                # existing SUP-04/SUP-07 caches stay valid.
+                _rk = lc_cfg.get("robust_kernel")
+                if isinstance(_rk, str) and _rk.lower() in ("", "none"):
+                    _rk = None
+                _rs = float(lc_cfg.get("robust_scale", 1.0))
                 optimizer = PoseGraphOptimizer(
                     odom_sigmas=gtsam_cfg.get("odom_sigmas"),
                     prior_sigmas=gtsam_cfg.get("prior_sigmas"),
+                    robust_kernel=_rk,
+                    robust_scale=_rs,
                 )
                 optimizer.build_graph(poses, edge_sigmas=edge_sigmas)
                 for i, j, rel_pose in closures:
                     optimizer.add_loop_closure(i, j, rel_pose)
                 optimized_poses = optimizer.optimize()
+                if verbose and _rk is not None:
+                    print(
+                        f"  [switchable] loop closures use robust kernel "
+                        f"{_rk!r} (scale={_rs})"
+                    )
         summary["timing"]["stage3"] = timer_s3.summary()
         # Sub-stage breakdown — sc_query and icp_verify accumulate per
         # frame / per candidate inside the detector; graph_optimize is the

@@ -1,8 +1,10 @@
-# LiDAR-Inertial SLAM & HD Map Pipeline
+# LiDAR-Inertial SLAM & Lanelet2 Lane-Level Mapping
 
-> A reproducible LiDAR-inertial SLAM and HD Map benchmark on KITTI and nuScenes. Covers pose-graph optimization, Scan Context loop closure, IMU tight coupling, degeneracy-aware edge sigmas, and Lanelet2 geometry export.
+> A reproducible LiDAR-inertial SLAM and lane-level mapping benchmark on KITTI and nuScenes. Covers pose-graph optimization, Scan Context loop closure, IMU tight coupling, degeneracy-aware edge sigmas, and Lanelet2 export (geometry + curb-driven lanelet pairing).
+>
+> _Previously named `lidar-slam-hdmap`; renamed to reflect the Lanelet2 lane-level scope (routing topology and traffic-sign semantics remain out of scope)._
 
-[![CI](https://img.shields.io/github/actions/workflow/status/trouties/lidar-slam-hdmap/ci.yml?branch=main&label=CI)](https://github.com/trouties/lidar-slam-hdmap/actions)
+[![CI](https://img.shields.io/github/actions/workflow/status/trouties/lidar-slam-lanelet2/ci.yml?branch=main&label=CI)](https://github.com/trouties/lidar-slam-lanelet2/actions)
 ![Python](https://img.shields.io/badge/Python-3.10-3776AB?logo=python&logoColor=white)
 ![License](https://img.shields.io/badge/License-MIT-green)
 ![Platform](https://img.shields.io/badge/Platform-Linux%20%7C%20WSL2-lightgrey)
@@ -23,15 +25,15 @@
 └──────────────┘    └───────────────┘   └──────────────────┘  └────────┬────────┘
                                                                        │
                      Stage 6              Stage 5              smoothed poses
-                     HD Map Export        Mapping              + point clouds
+                     Lanelet2 Export      Mapping              + point clouds
                     ┌───────────────┐   ┌──────────────────┐         │
                     │ Lanelet2 .osm │<──│ Voxel Map Builder│<────────┘
                     │ LineString +  │   │+ Lane/Curb Extr. │
-                    │ Area only     │   │                  │
+                    │ Lanelet pairs │   │                  │
                     └───────────────┘   └──────────────────┘
 ```
 
-Stage 4 (ESKF) is pose smoothing only; KITTI Odometry has no IMU, so it runs a constant-velocity model. Tight IMU coupling lives in a separate Stage 3.5 branch invoked by `scripts/compare_tight_vs_loose.py` (SUP-04). Stage 6 exports the Lanelet2 geometry layer (`lineStringLayer`); the semantic `laneletLayer` is empty (see Known Limitations FM-3).
+Stage 4 (ESKF) is pose smoothing only; KITTI Odometry has no IMU, so it runs a constant-velocity model. Tight IMU coupling lives in a separate Stage 3.5 branch invoked by `scripts/compare_tight_vs_loose.py` (SUP-04). Stage 6 exports the Lanelet2 geometry layer plus curb-driven `laneletLayer` pairing (FM-3 / SUP-12 in progress).
 
 ## Results
 
@@ -57,6 +59,7 @@ Full record: `refs/sup-notes.md` + per-phase diagnostic reports in `results/diag
 |---------------|-------------:|------:|
 | Stage 2: KISS-ICP odometry only | 12.53 | baseline |
 | Stage 3: + pose graph + Scan Context | 10.58 | −15.6% |
+| Stage 3: + Switchable Constraints (`huber scale=2.0`) | 10.19 | −3.7% vs Stage 3 |
 | Stage 3.5: + IMU tight coupling (SUP-04) | 9.22 | −20.0% vs loose |
 | Stage 4: + ESKF pose smoothing | 10.58 | <0.01 m |
 
@@ -69,7 +72,9 @@ Full record: `refs/sup-notes.md` + per-phase diagnostic reports in `results/diag
 | Full pipeline (200 frames, Seq 00) | 50.6 s |
 | Loop closures detected (Seq 00 full) | 2,635 |
 | Loop closure precision | 0.967 |
-| Loop closure recall | 0.195 |
+| Loop closure place recall (per-revisit, 6 events) | 0.667 (4/6 @ P=0.967) |
+| Loop closure place recall @ P=0.95 (pre-ICP) | 1.000 (6/6) |
+| Loop closure per-pair recall (GT coverage) | 0.831 |
 | Stage 3 speedup (production config, SUP-03) | 2.19× |
 | Stage 3 ICP verify speedup (downsample cache) | 3.36× |
 | GNSS denial drift (Seq 00, 150 m window) | 0.003 m/m |
@@ -124,16 +129,17 @@ Both acceptance criteria pass: (1) Seq 01 `cond_p50` ≥ 2×Seq 00 `cond_p95` (g
 
 ## Scope
 
-The complete chain from raw LiDAR scans to Lanelet2 `.osm` output — the open HD-map standard used by Autoware and Apollo. The current export covers the geometry layer (lane / curb polylines and areas); the semantic layer (lanelet relations, left/right pairing, routing topology) is tracked as SUP-12.
+The complete chain from raw LiDAR scans to Lanelet2 `.osm` output — the open lane-level map standard used by Autoware and Apollo. Coverage: geometry layer (lane / curb polylines, areas) and — via curb-driven lanelet pairing (SUP-12) — the `laneletLayer` with left/right relations. Routing topology and traffic-sign semantics remain out of scope.
 
 The author's geodetic-science background shapes the implementation: explicit WGS84 → UTM (EPSG:32632) reference frames, rigorous Velodyne ↔ camera ↔ world calibration chains, and GTSAM's factor-graph optimization treated as a generalization of least-squares network adjustment.
 
 ## Key Features
 
 - **Multi-dataset SLAM** — KITTI HDL-64E and nuScenes VLP-32C with per-dataset parameter adaptation.
-- **Scan Context v2 loop closure** — appearance-based place recognition; 2,635 closures on Seq 00 at P=0.967.
+- **Scan Context v2 loop closure** — appearance-based place recognition; 2,635 closures on Seq 00 at P=0.967; per-revisit place recall @ P=0.95 = 1.0 (6/6 events).
+- **Switchable Constraints on loop-closure factors** — Huber / Cauchy / Geman-McClure / DCS M-estimators (default off); `huber scale=2.0` reduces Seq 00 APE by 3.7%.
 - **Tight-coupled IMU preintegration** — GTSAM Forster-2017 factor; −20% APE vs loose fusion on Seq 00.
-- **Lanelet2 geometry export** — PCA-classified lane / curb morphology, RDP-simplified, written as `lineStringLayer`.
+- **Lanelet2 lane-level export** — PCA-classified lane / curb morphology, RDP-simplified; `lineStringLayer` + curb-driven `laneletLayer` pairing (SUP-12).
 - **4-system baseline comparison** — Dockerized hdl_graph_slam / FAST-LIO2 / LIO-SAM with APE/RPE tables and Phase C/E source-level fixes.
 - **Runtime profiling + Stage-3 2.19× speedup** — per-unique-frame downsample cache, zero APE regression.
 - **Uncertainty under GNSS denial (SUP-06)** — GTSAM marginals → 3D 2σ ellipsoids, 26–28× inflation then recovery.
@@ -147,7 +153,7 @@ The author's geodetic-science background shapes the implementation: explicit WGS
 Runs the full pipeline on a 200-frame KITTI Seq 00 subset shipped via GitHub Release `sup09-subset-v1` (~278 MB gzipped) and writes `results/ape.txt` + `results/trajectory.png`.
 
 ```bash
-export SUP09_SUBSET_URL="https://github.com/<user>/lidar-slam-hdmap/releases/download/sup09-subset-v1/kitti_seq00_200.tar.gz"
+export SUP09_SUBSET_URL="https://github.com/<user>/lidar-slam-lanelet2/releases/download/sup09-subset-v1/kitti_seq00_200.tar.gz"
 export SUP09_SUBSET_SHA256="$(curl -sL ${SUP09_SUBSET_URL}.sha256 | awk '{print $1}')"  # optional
 
 docker compose build     # ~5 min
@@ -233,7 +239,7 @@ Acceptance (KITTI Seq 00 × 500 frames):
 ## Repository Structure
 
 ```
-lidar-slam-hdmap/
+lidar-slam-lanelet2/
 ├── src/
 │   ├── data/                # Stage 1 — KITTI, nuScenes, IMU loaders
 │   ├── odometry/            # Stage 2 — KISS-ICP wrapper
@@ -263,7 +269,7 @@ lidar-slam-hdmap/
 | 3 | **Graph Optimization** | odometry + clouds + IMU → optimized SE(3) | GTSAM LM + Scan Context v2 (ICP fitness ≥ 0.9), optional IMU factor, optional SUP-07 edge σ downgrade. |
 | 4 | **Sensor Fusion** | optimized poses → smoothed SE(3) | ESKF pose smoothing with constant-velocity model when no IMU. SUP-04 tight IMU is a separate script. |
 | 5 | **Mapping & Features** | fused poses + clouds → lane / curb clusters + global map | NumPy streaming voxel aggregation. Lane: `intensity ≥ 0.40` + DBSCAN. Curb: height-jump in 0.30 m grid. |
-| 6 | **HD Map Export** | clusters → Lanelet2 `.osm` | RDP polyline simplification (ε=0.05 m), separate lane and curb pipelines. `laneletLayer` empty (see FM-3). |
+| 6 | **Lanelet2 Export** | clusters → Lanelet2 `.osm` | RDP polyline simplification (ε=0.05 m), separate lane and curb pipelines + curb-driven lanelet pairing (SUP-12). |
 
 ### Supplement Tasks
 
@@ -304,7 +310,7 @@ Every benchmark run is tracked in [`benchmarks/benchmark_manifest.json`](benchma
 | Fusion | Error-State KF | IMU-less constant-velocity fallback |
 | Mapping | NumPy streaming voxel | Memory-safe global map aggregation |
 | Mapping | DBSCAN (scikit-learn) | Lane marking + curb boundary clustering |
-| Export | [Lanelet2](https://github.com/fzi-forschungszentrum-informatik/Lanelet2) | HD Map standard, OSM XML format |
+| Export | [Lanelet2](https://github.com/fzi-forschungszentrum-informatik/Lanelet2) | Lane-level map standard, OSM XML format |
 | Evaluation | [evo](https://github.com/MichaelGrupp/evo) | APE/RPE trajectory metrics |
 | Infrastructure | Docker | Reproducible baseline comparison |
 | CI | GitHub Actions | Ruff lint + pytest |
@@ -314,8 +320,8 @@ Every benchmark run is tracked in [`benchmarks/benchmark_manifest.json`](benchma
 | # | Mode | Root cause & fix path |
 |---|------|----------------------|
 | FM-1 | ESKF adds no value on KITTI Odometry (Stage 4 APE ≈ Stage 3) | KITTI Odometry has no IMU; Stage 4 runs a constant-velocity model. True IMU integration requires the Stage 3.5 tight-coupled branch (SUP-04). |
-| FM-2 | Loop closure recall capped at ~20% (P=0.967, R=0.195) | `max_matches_per_query=5` caps at ~22% structurally; ICP@0.9 prunes further. Raising the cap yields diminishing returns with linear ICP cost. |
-| FM-3 | Empty `laneletLayer` — the `.osm` is geometric, not a semantic HD map | Stage 6 writes only `lineStringLayer`. Consumers expecting lane pairing or routing see zero lanelets. Fix: curb-driven pairing, tracked as P1-2 / SUP-12. |
+| FM-2 | Post-ICP place recall 0.667 (4/6 revisit events at P=0.967); `icp_fitness_threshold=0.9` drops 2 geometrically degenerate events | Pre-ICP SC sweep hits 6/6 at P=0.95. Switchable constraints on loop-closure factors (Huber/Cauchy/GM/DCS, default off) reduce Seq 00 APE by 3.7% at `huber scale=2.0`. SC++ / learning descriptors / GPS prior remain out of spec. |
+| FM-3 | `laneletLayer` pairing incomplete | Stage 6 currently emits `lineStringLayer` + curb polylines; curb-driven left/right lanelet pairing is in progress as SUP-12. Routing topology and traffic-sign semantics remain out of scope. |
 | FM-4 | Flat-ground assumption (lane / curb lost on hills, multi-level) | Fixed `road_z_min/max = [-2.0, -1.5]` window. Fix: per-frame terrain adaptation. P3 task. |
 | FM-5 | Conservative IMU noise lock (`accel_noise_sigma=5.0`, ~17× OxTS datasheet) | Workaround for (a) approximate LiDAR↔IMU timestamp alignment, (b) OxTS filtered nav data vs raw IMU mismatch, (c) calibration residuals. Tightening to σ=0.3 inflates Tight APE to 27.85 m. Fix tracked as P0-2. |
 | FM-6 | No traffic sign / signal extraction | Stage 5 filters the road-plane z-band only. Fix: SUP-17 heuristic stop-line / crosswalk detection. |

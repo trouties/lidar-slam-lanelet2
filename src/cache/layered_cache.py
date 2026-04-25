@@ -72,9 +72,21 @@ def _config_subtree(stage: str, config: dict) -> dict:
         # pose graph, so toggling sup07 must invalidate the optimized
         # cache. We intentionally DO NOT put sup07 into the ``odometry``
         # subtree because KISS-ICP registration itself is unaffected.
+        #
+        # SUP-?? Switchable Constraints: ``loop_closure.robust_kernel`` +
+        # ``robust_scale`` were added with a no-op default ("none", 1.0).
+        # Strip them from the hash when unset so pre-existing SUP-04 /
+        # SUP-07 caches (multi-hour to regenerate) stay valid.
+        lc = dict(config.get("loop_closure", {}))
+        _rk = lc.get("robust_kernel")
+        _rs = lc.get("robust_scale", 1.0)
+        if (_rk is None or (isinstance(_rk, str) and _rk.lower() in ("", "none"))) \
+                and float(_rs) == 1.0:
+            lc.pop("robust_kernel", None)
+            lc.pop("robust_scale", None)
         return {
             "gtsam": config.get("gtsam", {}),
-            "loop_closure": config.get("loop_closure", {}),
+            "loop_closure": lc,
             "sup07": config.get("sup07", {}),
         }
     if stage == "fused":

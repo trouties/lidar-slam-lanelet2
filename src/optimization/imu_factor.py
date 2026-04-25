@@ -114,6 +114,8 @@ def build_tight_coupled_graph(
     gyro_bias_sigma: float = 0.01,
     return_marginals: bool = False,
     edge_sigmas: list[list[float] | np.ndarray | None] | None = None,
+    robust_kernel: str | None = None,
+    robust_scale: float = 1.0,
 ) -> tuple[
     list[np.ndarray],
     list[np.ndarray],
@@ -147,6 +149,11 @@ def build_tight_coupled_graph(
             the edge ``(i-1, i)`` (entry ``0`` is unused). Accepts either
             a 6-list ``[tx,ty,tz,rx,ry,rz]`` (diagonal) or a ``(6, 6)``
             ndarray in GTSAM tangent order (full covariance).
+        robust_kernel: Optional M-estimator name wrapping the loop-closure
+            noise only (odometry / IMU / prior stay Gaussian). Mirrors the
+            :class:`PoseGraphOptimizer` option so Tier A switchable
+            constraints apply identically to the tight-coupled path.
+        robust_scale: Kernel scale parameter forwarded to :func:`_make_robust`.
 
     Returns:
         Tuple of (optimized_poses, bias_history).
@@ -162,6 +169,15 @@ def build_tight_coupled_graph(
     prior_noise = gtsam.noiseModel.Diagonal.Sigmas(np.array([*prior_sigmas[3:], *prior_sigmas[:3]]))
     _lc_sigmas = loop_closure_sigmas if loop_closure_sigmas is not None else odom_sigmas
     lc_noise = gtsam.noiseModel.Diagonal.Sigmas(np.array([*_lc_sigmas[3:], *_lc_sigmas[:3]]))
+
+    # Tier A switchable constraints: wrap only the loop-closure noise in a
+    # robust kernel so false-positive closures are down-weighted rather
+    # than bent into the trajectory. Imported late to avoid any top-level
+    # circularity with pose_graph (which has no runtime dep on this file
+    # but stays a single source of truth for the helper).
+    from src.optimization.pose_graph import _make_robust
+
+    lc_noise = _make_robust(robust_kernel, robust_scale, lc_noise)
 
     # Key scheme: pose=P(i), velocity=V(i), bias=B(i)
     def P(i):

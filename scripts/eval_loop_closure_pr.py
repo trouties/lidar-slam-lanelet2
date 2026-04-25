@@ -82,15 +82,23 @@ def _count_gt_coverage(
     so the resulting ratio stays in [0, 1] regardless of how densely detections
     cluster around a single GT. ``_count_tp`` above counts the detection side
     and can exceed ``len(gt_pairs)``.
+
+    Chunks detections along the D axis so the transient (chunk, M, 2) buffer
+    stays under ~2 GB even at the permissive end of a PR sweep (n_detected
+    can reach >100 k when SC threshold is lenient).
     """
     if not detected_pairs or not gt_pairs:
         return 0
     det = np.array(list(detected_pairs))  # (D, 2)
     gt = np.array(list(gt_pairs))  # (M, 2)
-    # (D, 1, 2) - (1, M, 2) -> (D, M, 2); collapse to per-GT coverage on axis 0.
-    diff = np.abs(det[:, None, :] - gt[None, :, :])
-    match = (diff[:, :, 0] <= tolerance_frames) & (diff[:, :, 1] <= tolerance_frames)
-    return int(match.any(axis=0).sum())
+    covered = np.zeros(len(gt), dtype=bool)
+    chunk = 2000
+    for start in range(0, len(det), chunk):
+        d = det[start:start + chunk]  # (C, 2)
+        diff = np.abs(d[:, None, :] - gt[None, :, :])  # (C, M, 2)
+        match = (diff[:, :, 0] <= tolerance_frames) & (diff[:, :, 1] <= tolerance_frames)
+        covered |= match.any(axis=0)
+    return int(covered.sum())
 
 
 def _cluster_gt_pairs(
@@ -157,11 +165,18 @@ def _count_event_tp(
         return 0
     det = np.array(list(detected_pairs))  # (D, 2)
     tp_events = 0
+    chunk = 2000
     for event in gt_events:
         event_arr = np.array(list(event))  # (E, 2)
-        diff = np.abs(det[:, None, :] - event_arr[None, :, :])
-        match = (diff[:, :, 0] <= tolerance_frames) & (diff[:, :, 1] <= tolerance_frames)
-        if match.any():
+        hit = False
+        for start in range(0, len(det), chunk):
+            d = det[start:start + chunk]  # (C, 2)
+            diff = np.abs(d[:, None, :] - event_arr[None, :, :])
+            match = (diff[:, :, 0] <= tolerance_frames) & (diff[:, :, 1] <= tolerance_frames)
+            if match.any():
+                hit = True
+                break
+        if hit:
             tp_events += 1
     return tp_events
 
@@ -172,6 +187,7 @@ def _eval_detector(
     dataset,
     gt_pairs: set[tuple[int, int]],
     gt_events: list[frozenset[tuple[int, int]]] | None = None,
+    tolerance_frames: int = 20,
 ) -> dict:
     """Evaluate a detector against GT pairs.
 
@@ -179,36 +195,47 @@ def _eval_detector(
     :attr:`LoopClosureDetector.last_pre_icp_candidates` populated during
     ``detect()``. When ``gt_events`` is provided, also reports
     place-recall (one hit per event) and per-run ICP verify wall time.
+    ``place_recall`` is the canonical loop closure recall (Kim & Kim 2018
+    style); ``per_pair_recall`` is kept as a secondary indicator.
+    ``recall`` aliases ``place_recall`` when events are provided, and
+    falls back to ``per_pair_recall`` otherwise, for legacy readers.
     """
     closures = detector.detect(poses, dataset=dataset)
     post_pairs = {(i, j) for i, j, _ in closures}
     pre_pairs = set(detector.last_pre_icp_candidates)
 
-    post_tp = _count_tp(post_pairs, gt_pairs)
-    pre_tp = _count_tp(pre_pairs, gt_pairs)
+    post_tp = _count_tp(post_pairs, gt_pairs, tolerance_frames=tolerance_frames)
+    pre_tp = _count_tp(pre_pairs, gt_pairs, tolerance_frames=tolerance_frames)
     # GT-side coverage for per_pair_recall — bounded by n_gt.
-    post_gt_cov = _count_gt_coverage(post_pairs, gt_pairs)
+    post_gt_cov = _count_gt_coverage(post_pairs, gt_pairs, tolerance_frames=tolerance_frames)
     n = len(post_pairs)
     n_gt = len(gt_pairs)
 
     icp_total_ms = detector.icp_verify_timer.summary().get("total_ms", 0.0)
+
+    per_pair_recall = post_gt_cov / n_gt if n_gt else 0.0
 
     result: dict = {
         "n_detected": n,
         "n_gt": n_gt,
         "n_tp": post_tp,
         "precision": post_tp / n if n else 0.0,
-        "recall": post_gt_cov / n_gt if n_gt else 0.0,
+        "per_pair_recall": per_pair_recall,
         "pre_icp_tp": pre_tp,
         "post_icp_tp": post_tp,
-        "per_pair_recall": post_gt_cov / n_gt if n_gt else 0.0,
         "icp_time_s": icp_total_ms / 1000.0,
     }
     if gt_events is not None:
-        place_tp = _count_event_tp(post_pairs, gt_events)
+        place_tp = _count_event_tp(post_pairs, gt_events, tolerance_frames=tolerance_frames)
+        place_recall = place_tp / len(gt_events) if gt_events else 0.0
         result["n_events"] = len(gt_events)
         result["place_tp"] = place_tp
-        result["place_recall"] = place_tp / len(gt_events) if gt_events else 0.0
+        result["place_recall"] = place_recall
+        # Canonical recall = place_recall when available.
+        result["recall"] = place_recall
+    else:
+        # Legacy alias for backward-compatible readers.
+        result["recall"] = per_pair_recall
     return result
 
 
@@ -218,11 +245,15 @@ def _eval_pr_curve_sc(
     n_frames: int,
     gt_pairs: set[tuple[int, int]],
     thresholds: list[float],
+    gt_events: list[frozenset[tuple[int, int]]] | None = None,
+    tolerance_frames: int = 20,
 ) -> list[dict]:
     """Compute PR curve by sweeping SC distance threshold on pre-ICP candidates.
 
     Runs SC detection once with a lenient threshold, then filters at each
-    sweep point.  This evaluates the SC descriptor quality without ICP cost.
+    sweep point. This evaluates the SC descriptor quality without ICP cost.
+    When ``gt_events`` is provided, each row also carries the per-revisit
+    (place) recall — the canonical place-recognition recall (Kim & Kim 2018).
     """
     orig_thresh = detector.sc_distance_threshold
     orig_max = detector.sc_max_matches_per_query
@@ -235,18 +266,32 @@ def _eval_pr_curve_sc(
     detector.sc_max_matches_per_query = orig_max
 
     rows = []
+    n_events = len(gt_events) if gt_events is not None else 0
     for t in sorted(thresholds):
         filtered = {(i, j) for i, j, d in cands if d < t}
-        tp = _count_tp(filtered, gt_pairs)
-        gt_cov = _count_gt_coverage(filtered, gt_pairs)
+        tp = _count_tp(filtered, gt_pairs, tolerance_frames=tolerance_frames)
+        gt_cov = _count_gt_coverage(filtered, gt_pairs, tolerance_frames=tolerance_frames)
         n = len(filtered)
-        rows.append({
+        per_pair_recall = gt_cov / len(gt_pairs) if gt_pairs else 0.0
+
+        row: dict = {
             "threshold": round(t, 2),
             "n_detected": n,
             "n_tp": tp,
             "precision": tp / n if n else 0.0,
-            "recall": gt_cov / len(gt_pairs) if gt_pairs else 0.0,
-        })
+            "per_pair_recall": per_pair_recall,
+        }
+        if gt_events is not None:
+            place_tp = _count_event_tp(filtered, gt_events, tolerance_frames=tolerance_frames)
+            place_recall = place_tp / n_events if n_events else 0.0
+            row["place_tp"] = place_tp
+            row["n_events"] = n_events
+            row["place_recall"] = place_recall
+            # Canonical recall column tracks place_recall when events are provided.
+            row["recall"] = place_recall
+        else:
+            row["recall"] = per_pair_recall
+        rows.append(row)
     return rows
 
 
@@ -305,6 +350,22 @@ def main() -> None:
             "Writes results/sup02_round2_seq{seq}.csv with per-pair + place recall."
         ),
     )
+    parser.add_argument(
+        "--cluster-gap",
+        type=int,
+        default=50,
+        help=(
+            "Chebyshev gap (in frames) for clustering GT pairs into revisit "
+            "events used by place_recall. 50 ≈ 5 s @10 Hz on KITTI, the "
+            "typical dwell time inside a 5 m revisit ball."
+        ),
+    )
+    parser.add_argument(
+        "--tolerance-frames",
+        type=int,
+        default=20,
+        help="Chebyshev tolerance (frames) when matching detected pairs against GT.",
+    )
     args = parser.parse_args()
 
     config = load_config(args.config)
@@ -350,7 +411,14 @@ def main() -> None:
 
     # Build GT loop pairs (aligned with detector min_frame_gap)
     gt_pairs = _build_gt_loops(gt_velo, distance_threshold=5.0, min_frame_gap=min_gap)
-    print(f"GT loop pairs: {len(gt_pairs)} (min_frame_gap={min_gap})")
+    # Cluster GT pairs into revisit events for canonical place_recall. This
+    # was previously only wired into --k-sweep; making it default ensures the
+    # main CSV and the PR curve both report per-revisit recall.
+    gt_events = _cluster_gt_pairs(gt_pairs, cluster_gap=args.cluster_gap)
+    print(
+        f"GT loop pairs: {len(gt_pairs)} (min_frame_gap={min_gap}); "
+        f"revisit events: {len(gt_events)} (cluster_gap={args.cluster_gap})"
+    )
 
     rows = []
 
@@ -362,9 +430,16 @@ def main() -> None:
         icp_fitness_threshold=lc_cfg.get("icp_fitness_threshold", 0.9),
         mode="v1",
     )
-    result_v1 = _eval_detector(det_v1, poses, dataset, gt_pairs)
-    print(f"  v1: detected={result_v1['n_detected']} TP={result_v1['n_tp']} "
-          f"P={result_v1['precision']:.3f} R={result_v1['recall']:.3f}")
+    result_v1 = _eval_detector(
+        det_v1, poses, dataset, gt_pairs,
+        gt_events=gt_events, tolerance_frames=args.tolerance_frames,
+    )
+    print(
+        f"  v1: detected={result_v1['n_detected']} TP={result_v1['n_tp']} "
+        f"P={result_v1['precision']:.3f} "
+        f"place_R={result_v1['place_recall']:.3f} "
+        f"per_pair_R={result_v1['per_pair_recall']:.3f}"
+    )
     rows.append({"system": "v1", **result_v1})
 
     # --- Evaluate v2 (Scan Context) ---
@@ -382,16 +457,40 @@ def main() -> None:
         sc_query_stride=sc_cfg.get("query_stride", 1),
         sc_max_matches_per_query=sc_cfg.get("max_matches_per_query", 0),
     )
-    result_v2 = _eval_detector(det_v2, poses, dataset, gt_pairs)
-    print(f"  v2: detected={result_v2['n_detected']} TP={result_v2['n_tp']} "
-          f"P={result_v2['precision']:.3f} R={result_v2['recall']:.3f}")
+    result_v2 = _eval_detector(
+        det_v2, poses, dataset, gt_pairs,
+        gt_events=gt_events, tolerance_frames=args.tolerance_frames,
+    )
+    print(
+        f"  v2: detected={result_v2['n_detected']} TP={result_v2['n_tp']} "
+        f"P={result_v2['precision']:.3f} "
+        f"place_R={result_v2['place_recall']:.3f} "
+        f"per_pair_R={result_v2['per_pair_recall']:.3f}"
+    )
     rows.append({"system": "v2", **result_v2})
 
-    # Write summary CSV
+    # Write summary CSV with a stable header order. ``recall`` aliases
+    # ``place_recall`` when revisit events are available, so legacy readers
+    # that expect a ``recall`` column still see the canonical value.
     out_path = Path("results") / f"loop_closure_pr_seq{seq}.csv"
     out_path.parent.mkdir(parents=True, exist_ok=True)
+    fieldnames = [
+        "system",
+        "n_detected",
+        "n_gt",
+        "n_tp",
+        "precision",
+        "recall",
+        "place_recall",
+        "per_pair_recall",
+        "n_events",
+        "place_tp",
+        "pre_icp_tp",
+        "post_icp_tp",
+        "icp_time_s",
+    ]
     with out_path.open("w", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
+        writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
         writer.writeheader()
         writer.writerows(rows)
     print(f"\nResults written to {out_path}")
@@ -400,23 +499,46 @@ def main() -> None:
     if args.pr_curve:
         print("\n--- Computing SC pre-ICP PR curve ---")
         thresholds = [x * 0.05 for x in range(2, 17)]  # 0.10 to 0.80
-        pr_rows = _eval_pr_curve_sc(det_v2, dataset, len(poses), gt_pairs, thresholds)
+        pr_rows = _eval_pr_curve_sc(
+            det_v2, dataset, len(poses), gt_pairs, thresholds,
+            gt_events=gt_events, tolerance_frames=args.tolerance_frames,
+        )
 
-        # Find recall @ precision=0.95
-        r_at_p95 = 0.0
+        # SUP-02 acceptance point: recall @ precision=0.95. We report both
+        # the canonical place (per-revisit) and the legacy per-pair values
+        # so the threshold point can be read off either axis.
+        r_place_at_p95 = 0.0
+        r_pair_at_p95 = 0.0
         for row in pr_rows:
             if row["precision"] >= 0.95:
-                r_at_p95 = max(r_at_p95, row["recall"])
+                r_place_at_p95 = max(r_place_at_p95, row.get("place_recall", 0.0))
+                r_pair_at_p95 = max(r_pair_at_p95, row.get("per_pair_recall", 0.0))
 
-        print(f"  recall @ P=0.95 (pre-ICP): {r_at_p95:.4f}")
+        print(f"  place recall @ P=0.95 (pre-ICP): {r_place_at_p95:.4f}")
+        print(f"  per-pair recall @ P=0.95 (pre-ICP): {r_pair_at_p95:.4f}")
         for row in pr_rows:
-            print(f"    SC<{row['threshold']:.2f}: "
-                  f"det={row['n_detected']} TP={row['n_tp']} "
-                  f"P={row['precision']:.3f} R={row['recall']:.3f}")
+            print(
+                f"    SC<{row['threshold']:.2f}: "
+                f"det={row['n_detected']} TP={row['n_tp']} "
+                f"P={row['precision']:.3f} "
+                f"place_R={row.get('place_recall', row.get('recall', 0.0)):.3f} "
+                f"per_pair_R={row['per_pair_recall']:.3f}"
+            )
 
         pr_path = Path("results") / f"loop_closure_pr_curve_seq{seq}.csv"
+        pr_fieldnames = [
+            "threshold",
+            "n_detected",
+            "n_tp",
+            "precision",
+            "recall",
+            "place_recall",
+            "per_pair_recall",
+            "place_tp",
+            "n_events",
+        ]
         with pr_path.open("w", newline="") as f:
-            writer = csv.DictWriter(f, fieldnames=list(pr_rows[0].keys()))
+            writer = csv.DictWriter(f, fieldnames=pr_fieldnames, extrasaction="ignore")
             writer.writeheader()
             writer.writerows(pr_rows)
         print(f"  PR curve written to {pr_path}")
@@ -431,10 +553,11 @@ def main() -> None:
         if not k_values:
             raise SystemExit("--k-sweep must specify at least one K value")
 
-        gt_events = _cluster_gt_pairs(gt_pairs, cluster_gap=50)
+        # Reuse the canonical event set built earlier so all headline
+        # numbers share the same clustering configuration.
         print(
             f"  GT events: {len(gt_events)} "
-            f"(from {len(gt_pairs)} pairs, cluster_gap=50 frames)"
+            f"(from {len(gt_pairs)} pairs, cluster_gap={args.cluster_gap} frames)"
         )
 
         round2_rows = []
@@ -454,7 +577,10 @@ def main() -> None:
                 sc_max_matches_per_query=k,
                 icp_downsample_voxel=lc_cfg.get("icp_downsample_voxel", 1.0),
             )
-            r = _eval_detector(det_k, poses, dataset, gt_pairs, gt_events=gt_events)
+            r = _eval_detector(
+                det_k, poses, dataset, gt_pairs,
+                gt_events=gt_events, tolerance_frames=args.tolerance_frames,
+            )
             round2_rows.append({
                 "K": k,
                 "pre_icp_tp": r["pre_icp_tp"],

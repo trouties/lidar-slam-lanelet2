@@ -1,4 +1,4 @@
-# Default configuration for LiDAR SLAM HD Map Pipeline
+# Default configuration for LiDAR SLAM & Lanelet2 Lane-Level Mapping Pipeline
 
 data:
   kitti_root: "~/data/kitti/odometry/dataset"
@@ -75,6 +75,17 @@ loop_closure:
     top_k: 25                    # ring-key candidates to re-rank per query
     query_stride: 1              # query every N-th frame (1 = every frame for max recall)
     max_matches_per_query: 5     # cap per-frame matches to control ICP cost; 0 = unlimited
+  # Switchable Constraints on loop closure factors (Sünderhauf 2012 / Agarwal 2013 DCS).
+  # Wraps *only* the loop closure BetweenFactor noise in an M-estimator so
+  # false-positive closures (Seq 00 v2 P=0.967 ⇒ ~88/2635 FP) are down-weighted
+  # rather than bent into the trajectory. Odometry / prior / IMU factors stay
+  # pure Gaussian.
+  #
+  # Defaults (kernel=none, scale=1.0) are a no-op and are stripped from the
+  # optimized-cache hash (src/cache/layered_cache.py) so SUP-04 / SUP-07 caches
+  # remain bit-exact.
+  robust_kernel: none            # none | huber | cauchy | gm | gemanmcclure | dcs
+  robust_scale: 1.0              # Huber/Cauchy k, GM c, DCS phi; unused when kernel=none
 
 ekf:
   process_noise_pos: 0.1
