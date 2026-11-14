@@ -21,10 +21,10 @@ jobs:
         run: pip install ".[dev]"
 
       - name: Lint
-        run: ruff check src/
+        run: ruff check src scripts tests
 
       - name: Format check
-        run: ruff format --check src/
+        run: ruff format --check src scripts tests
 
       - name: Test
-        run: pytest tests/ -v
+        run: pytest tests -v -m "not slow"

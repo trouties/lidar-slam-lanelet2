@@ -1,0 +1,5 @@
+sequence,feature,clusters,points,lateral_offset_median_m,clusters_0-2m,clusters_2-4m,clusters_4-6m,clusters_6-8m,clusters_>8m
+00,lane_marking,51,4122,11.66,0,0,0,7,44
+00,curb,306,9083,3.51,37,130,62,38,39
+01,lane_marking,7,419,12.93,0,1,0,0,6
+01,curb,371,7898,7.06,1,31,41,207,91

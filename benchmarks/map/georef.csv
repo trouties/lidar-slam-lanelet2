@@ -1,0 +1,9 @@
+sequence,source,projection,time_offset_s,control_points,horizontal_rms_m,horizontal_max_m,vertical_rms_m
+00,odometry,UTM,0.44,3847,2.959,7.821,1.419
+00,optimized,UTM,0.465,3847,0.413,1.87,0.581
+00,gt,UTM,0.46,3847,0.292,1.973,0.002
+00,gt,KITTI devkit Mercator,0.46,3847,0.065,1.73,0.002
+05,odometry,UTM,0.4,2742,0.937,2.992,1.115
+05,optimized,UTM,0.445,2741,0.179,0.462,0.168
+05,gt,UTM,0.445,2741,0.21,0.451,0.0
+05,gt,KITTI devkit Mercator,0.445,2741,0.014,0.039,0.0

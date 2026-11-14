@@ -1,13 +1,10 @@
-# Keep the build context small. The SUP-09 image only needs pyproject.toml,
-# src/, configs/, scripts/ (baked in by docker/Dockerfile.sup09). Everything
-# else is either local state (cache, results), test fixtures, or infrastructure
-# for other stages (ROS2 workspace, external baseline images).
+# Keep the build context small. The image needs only pyproject.toml, src/,
+# configs/ and scripts/ (docker/Dockerfile).
 
 .git
 .github
 .gitignore
 .vscode
-.claude
 .pytest_cache
 .ruff_cache
 **/__pycache__
@@ -15,14 +12,10 @@
 **/*.egg-info
 
 cache
-cache_sup09
 results
-logs
+data_subset
 benchmarks
+docs
 tests
-external
-ros2_ws
 
-# Keep .dockerignore and compose / docker configs out of the image contents
-# (they are meaningful only on the host).
 docker-compose*.yml

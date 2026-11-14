@@ -1,8 +1,4 @@
-"""Semantic feature extraction from point cloud maps.
-
-Extracts road boundaries, lane markings, and other HD Map features
-from the accumulated point cloud using geometric and intensity cues.
-"""
+"""Curb extraction from the accumulated point-cloud map."""
 
 from __future__ import annotations
 
@@ -11,52 +7,36 @@ from pathlib import Path
 
 import numpy as np
 import open3d as o3d
+from scipy.spatial import cKDTree
 
 
-def extract_road_surface(
-    points: np.ndarray,
-    intensities: np.ndarray,
-    z_min: float,
-    z_max: float,
-) -> tuple[np.ndarray, np.ndarray]:
-    """Extract candidate road-surface points by height filtering.
+def heights_in_nearest_pose_frame(points: np.ndarray, poses: np.ndarray) -> np.ndarray:
+    """Return the z coordinate of each point in the frame of its nearest pose.
+
+    The road and curb thresholds are heights in the sensor frame: the road is
+    about 1.73 m below the KITTI Velodyne. The world frame is the first
+    scan's sensor frame, and along a drive the road rises and falls by tens
+    of metres in it, so a fixed world-z band only finds the road where the
+    car happens to be at its starting height. Expressing every map point in
+    the sensor frame of the trajectory pose closest to it (horizontally)
+    measures its height relative to the road the car was driving on, and the
+    pose's pitch and roll follow the local slope and camber of that road.
 
     Args:
-        points: (N, 3) XYZ in world frame (Velodyne convention, z = up).
-        intensities: (N,) reflectance values aligned with ``points``.
-        z_min: Lower bound on z (inclusive).
-        z_max: Upper bound on z (inclusive).
+        points: ``(N, 3)`` world-frame XYZ.
+        poses: ``(M, 4, 4)`` sensor-to-world poses of the trajectory the map
+            was built from.
 
     Returns:
-        Tuple of (road_points, road_intensities) where z is within [z_min, z_max].
+        ``(N,)`` heights in metres.
     """
+    poses = np.asarray(poses, dtype=np.float64)
     if points.shape[0] == 0:
-        return points.copy(), intensities.copy()
-
-    mask = (points[:, 2] >= z_min) & (points[:, 2] <= z_max)
-    return points[mask], intensities[mask]
-
-
-def extract_lane_markings(
-    road_points: np.ndarray,
-    road_intensities: np.ndarray,
-    intensity_threshold: float,
-) -> np.ndarray:
-    """Filter road points by reflectance to isolate lane-marking candidates.
-
-    Args:
-        road_points: (N, 3) road-surface points.
-        road_intensities: (N,) reflectance values aligned with ``road_points``.
-        intensity_threshold: Keep points with reflectance >= this value.
-
-    Returns:
-        (M, 3) array of lane-marking candidate points.
-    """
-    if road_points.shape[0] == 0:
-        return road_points.copy()
-
-    mask = road_intensities >= intensity_threshold
-    return road_points[mask]
+        return np.zeros(0)
+    t = poses[:, :3, 3]
+    _, idx = cKDTree(t[:, :2]).query(points[:, :2], workers=-1)
+    up = poses[idx, :3, 2]
+    return np.einsum("ij,ij->i", points - t[idx], up)
 
 
 def extract_curbs(
@@ -68,6 +48,7 @@ def extract_curbs(
     height_max: float = 0.25,
     road_z_top: float = -1.55,
     top_band: float = 0.03,
+    heights: np.ndarray | None = None,
 ) -> np.ndarray:
     """Detect curb-top points via xy-grid height-step filtering.
 
@@ -76,31 +57,29 @@ def extract_curbs(
     which form the continuous line along a road boundary that DBSCAN can
     then cluster.
 
-    The project spec describes this feature as "法向量 + 曲率：路缘检测
-    （曲率突变 = 路面边界）". On a voxelized ground map (working voxel
-    0.15 m) the signal of interest reduces to a z discontinuity between
-    adjacent xy cells, so this implementation uses a pure-numpy 2D grid
-    instead of Open3D normal estimation. See ``refs/conventions.md`` §7
-    (Stage 5 MapBuilder memory discipline) — running ``estimate_normals``
-    on a 30M-point working map is not memory-safe; this function only
-    allocates ``O(N)`` int64 keys plus ``O(C)`` per-cell arrays
-    (``C`` = unique xy cells ``<< N``).
+    On a voxelized map the curb reduces to a height discontinuity between
+    neighbouring xy cells, so this uses a 2D grid instead of normal
+    estimation: ``estimate_normals`` on a 30M-point map does not fit in
+    memory, while this allocates ``O(N)`` int64 keys plus ``O(C)`` per-cell
+    arrays (``C`` = occupied xy cells ``<< N``).
 
     The ``road_z_top`` parameter is what makes the result semantically a
     *curb* and not just any short height step. A cell qualifies only if
-    its zmin sits at or below ``road_z_top`` (the cell contains road
-    points) AND its zmax is strictly above ``road_z_top`` (the cell also
+    its lowest point sits at or below ``road_z_top`` (the cell contains road
+    points) AND its highest point is strictly above it (the cell also
     contains points just above the road). Without this constraint the
     detector lights up on every wall / parked car / road dip whose
     *internal* range happens to fall in ``[height_min, height_max]``.
+
+    All height tests use ``heights`` when given (see
+    :func:`heights_in_nearest_pose_frame`), otherwise ``points[:, 2]``.
 
     Args:
         points: ``(N, 3)`` XYZ in world (Velodyne) frame.
         grid_size: xy bin edge length (m). Default 0.30 is 2× the working
             voxel to avoid snap aliasing.
-        z_min: Lower bound on the z pre-filter (m). Defaults to the same
-            value as ``road_z_min`` so the curb search band aligns with
-            the road-surface band.
+        z_min: Lower bound on the height pre-filter (m), about 0.27 m
+            below the road under the car (the sensor is 1.73 m above it).
         z_max: Upper bound on the z pre-filter (m). Extends above the
             road-surface band to include curb tops.
         height_min: Minimum per-cell ``zmax - zmin`` to count as a curb
@@ -108,28 +87,33 @@ def extract_curbs(
             from 0.15 m voxel snap.
         height_max: Maximum per-cell ``zmax - zmin`` — larger jumps get
             rejected as walls / vehicles / vegetation.
-        road_z_top: Road-surface upper-boundary z (m). A cell must
-            straddle this z to be considered a curb cell — see above.
-            Default -1.55 sits 0.05 m below ``road_z_max`` so the slight
-            lane-filter / curb-filter overlap captures the very lowest
-            curbs (~5 cm).
+        road_z_top: Height (m) a cell must straddle to count as a curb cell,
+            see above; -1.55 is 0.18 m above the road under the car. The
+            road falls away towards its edges, so a fixed value misses many
+            low curbs there (docs/map-quality.md).
         top_band: Keep points within this distance (m) of the cell ``zmax``.
             Default 0.03 m captures the top ~3 cm slab of the step.
+        heights: ``(N,)`` height of each point used for every height test.
+            Defaults to ``points[:, 2]``.
 
     Returns:
-        ``(M, 3)`` array of curb-top candidate points. ``M`` may be 0.
+        ``(M, 3)`` array of curb-top candidate points in world coordinates.
+        ``M`` may be 0.
     """
     if points.shape[0] == 0:
         return points.copy()
 
-    # Stage 1: prune to the z window — most of the working map is above
+    h_all = points[:, 2] if heights is None else heights
+
+    # Step 1: prune to the height window — most of the working map is above
     # this band (buildings, foliage) and is irrelevant for curbs.
-    z_mask = (points[:, 2] >= z_min) & (points[:, 2] <= z_max)
+    z_mask = (h_all >= z_min) & (h_all <= z_max)
     if not np.any(z_mask):
         return np.zeros((0, 3), dtype=points.dtype)
     band = points[z_mask]
+    band_h = h_all[z_mask]
 
-    # Stage 2: pack (x, y) cell index into a single int64 key using the
+    # Step 2: pack (x, y) cell index into a single int64 key using the
     # same bias+shift trick as ``_voxel_aggregate`` in map_builder.py.
     # ±2^20 cells per axis is far beyond any KITTI sequence footprint.
     bias = 1 << 20
@@ -149,13 +133,13 @@ def extract_curbs(
     n_cells = unique_keys.shape[0]
     del unique_keys
 
-    # Stage 3: per-cell zmin / zmax via unbuffered ufunc.at. These are
+    # Step 3: per-cell zmin / zmax via unbuffered ufunc.at. These are
     # ~10× slower than bincount but are the idiomatic numpy way to get
     # per-bin extrema; ~3-5 s on 30M points is acceptable.
     zmin = np.full(n_cells, np.inf, dtype=np.float64)
     zmax = np.full(n_cells, -np.inf, dtype=np.float64)
-    np.minimum.at(zmin, inverse, band[:, 2])
-    np.maximum.at(zmax, inverse, band[:, 2])
+    np.minimum.at(zmin, inverse, band_h)
+    np.maximum.at(zmax, inverse, band_h)
 
     cell_range = zmax - zmin
     cell_mask = (
@@ -167,26 +151,21 @@ def extract_curbs(
     if not np.any(cell_mask):
         return np.zeros((0, 3), dtype=points.dtype)
 
-    # Stage 4: keep only points within ``top_band`` of their cell's zmax,
+    # Step 4: keep only points within ``top_band`` of their cell's zmax,
     # restricted to cells that passed the height-step mask.
     point_cell_zmax = zmax[inverse]
-    point_mask = cell_mask[inverse] & (band[:, 2] >= point_cell_zmax - top_band)
+    point_mask = cell_mask[inverse] & (band_h >= point_cell_zmax - top_band)
     return band[point_mask]
 
 
 def _trim_cluster_minor_axis(cluster: np.ndarray, k: float = 2.5) -> np.ndarray:
     """Remove per-cluster outliers along the PCA minor axis using MAD.
 
-    A side effect of the ``dbscan_eps=0.7`` setting used by
-    :func:`cluster_points` is that virtual-lane fragments get bridged, which
-    widens the minor-axis spread of otherwise-thin lane-marking clusters.
-    Normal-consistent MAD (``1.4826 * median absolute deviation``) is robust
-    to the heavy-tailed residuals those bridges produce.
-
-    ``k=2.5`` keeps ~99% of a clean Gaussian line while still clipping the
-    DBSCAN bridge residuals (typically > 1.2 sigma_hat off-axis). A single
-    pass is sufficient; Stage 6 ``_pca_stats`` (``lanelet2_export.py``) uses
-    2/98 percentile spans as a second safety net.
+    DBSCAN grows a cluster through any chain of neighbours, so a line of
+    curb points picks up side branches into adjacent walls or vegetation,
+    which widen it across its axis. The normal-consistent MAD
+    (``1.4826 * median absolute deviation``) is robust to these heavy-tailed
+    residuals. ``k=2.5`` keeps about 99 % of a clean Gaussian line.
 
     Args:
         cluster: ``(N, 3)`` points in world-frame meters.
@@ -267,13 +246,13 @@ def cluster_points(
 def save_features_geojson(
     clusters: list[np.ndarray],
     path: Path,
-    feature_type: str = "lane_marking",
+    feature_type: str = "curb",
 ) -> None:
     """Write clustered feature points to a GeoJSON FeatureCollection.
 
-    Coordinates are kept in the local Velodyne metric frame (not lat/lon),
-    since KITTI Odometry has no GPS and real georeferencing happens in
-    Stage 6 (Lanelet2 export).
+    Coordinates are in the map frame (the Velodyne frame of the first scan),
+    not latitude and longitude; georeferencing happens in the Lanelet2
+    export.
 
     Args:
         clusters: List of (k_i, 3) point arrays, one per feature cluster.

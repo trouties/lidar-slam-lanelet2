@@ -1,14 +1,18 @@
-"""Tests for SUP-07 degeneracy analyzer."""
+"""Tests of the degeneracy analyzer and the edge relaxation built on it."""
 
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
 from src.odometry.degeneracy import (
     DegeneracyAnalyzer,
     DegeneracyScore,
     _pca_normals,
     _voxel_downsample,
+    directional_covariance,
+    downgraded_edge_covariances,
+    sustained_mask,
 )
 
 # ---------------------------------------------------------------------------
@@ -144,177 +148,110 @@ def test_score_null_constructor():
 
 
 # ---------------------------------------------------------------------------
-# Hysteresis / EMA tests (SUP-07 post-review fixes)
+# Sustained runs (EMA + minimum run length)
 # ---------------------------------------------------------------------------
 
 
-def test_hysteresis_rejects_single_spike():
-    """A 1-frame spike above threshold must not trigger."""
-    from scripts.run_pipeline import _apply_hysteresis
+def _max_run(mask: np.ndarray) -> int:
+    best = current = 0
+    for v in mask:
+        current = current + 1 if v else 0
+        best = max(best, current)
+    return best
 
+
+def test_sustained_mask_rejects_single_spike():
     cond = np.array([1.0, 1.0, 1.0, 10.0, 1.0, 1.0, 1.0, 1.0])
-    sustained = _apply_hysteresis(cond, threshold=5.0, ema_alpha=1.0, min_consecutive=5)
-    assert not sustained.any()
+    assert not sustained_mask(cond, threshold=5.0, ema_alpha=1.0, min_consecutive=5).any()
 
 
-def test_hysteresis_triggers_on_sustained_run():
-    """A run of 6 frames above threshold should trigger those frames."""
-    from scripts.run_pipeline import _apply_hysteresis
-
+def test_sustained_mask_keeps_a_long_run():
     cond = np.array([1.0, 1.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0, 1.0, 1.0])
-    sustained = _apply_hysteresis(cond, threshold=5.0, ema_alpha=1.0, min_consecutive=5)
-    # Indices 2-7 are above threshold for 6 consecutive frames; erode/dilate
-    # with a 5-wide structuring element should keep all 6.
+    sustained = sustained_mask(cond, threshold=5.0, ema_alpha=1.0, min_consecutive=5)
+    # The opening with a 5-wide element keeps the whole 6-frame run.
     assert sustained[2:8].all()
     assert not sustained[0:2].any()
     assert not sustained[8:].any()
 
 
-def test_hysteresis_ema_suppresses_noise():
-    """EMA smoothing should let alternating noise below threshold not trigger."""
-    from scripts.run_pipeline import _apply_hysteresis
-
-    # Alternating 2 and 8 around threshold 5: raw above=[F,T,F,T,F,T,F,T]
-    # EMA with alpha=0.3 pulls toward midpoint ~5, stays below 5 on dip frames.
+def test_sustained_mask_ema_breaks_alternating_noise():
+    # Half the raw frames exceed the threshold, but the EMA stays below it on the dips.
     cond = np.tile([2.0, 8.0], 10)
-    sustained = _apply_hysteresis(cond, threshold=5.0, ema_alpha=0.3, min_consecutive=5)
-    # No 5-consecutive run should form even though half the raw frames exceed.
-    runs = sustained.astype(int)
-    max_run = 0
-    current = 0
-    for v in runs:
-        if v:
-            current += 1
-            max_run = max(max_run, current)
-        else:
-            current = 0
-    assert max_run < 5, f"EMA should break the alternating pattern, max_run={max_run}"
-
-
-def test_build_edge_sigmas_hysteresis_integration():
-    """End-to-end: single spike is suppressed, sustained run is downgraded."""
-    from scripts.run_pipeline import _build_edge_sigmas
-
-    n = 20
-    scores = np.zeros((n, 7), dtype=np.float64)
-    scores[:, 0] = 1.0  # all below threshold
-    scores[5, 0] = 100.0  # single spike — should NOT trigger
-    scores[10:18, 0] = 50.0  # 8-frame sustained run — SHOULD trigger
-
-    edges = _build_edge_sigmas(
-        scores,
-        base_sigmas=[0.1, 0.1, 0.1, 0.01, 0.01, 0.01],
-        threshold=5.0,
-        inflation_factor=10.0,
-        ema_alpha=1.0,
-        min_consecutive=5,
-    )
-    assert edges[5] is None, "single spike should NOT trigger"
-    assert all(edges[i] is not None for i in range(10, 18)), "sustained run should trigger"
-    assert edges[0] is None and edges[9] is None
+    sustained = sustained_mask(cond, threshold=5.0, ema_alpha=0.3, min_consecutive=5)
+    assert _max_run(sustained) < 5
 
 
 # ---------------------------------------------------------------------------
-# Directional sigma inflation tests (SUP-07 Iter1)
+# Directional inflation of the odometry-edge covariance
 # ---------------------------------------------------------------------------
 
 
-def test_directional_covariance_symmetric_psd():
-    """Directional 6x6 covariance must be symmetric and positive semi-definite."""
-    from scripts.run_pipeline import _directional_covariance
-
-    v = np.array([0.6, -0.8, 0.0])  # arbitrary non-axial direction
-    cov = _directional_covariance(
-        base_sigmas=[0.1, 0.1, 0.1, 0.01, 0.01, 0.01],
-        eig_direction=v,
-        inflation_factor=10.0,
-    )
+def test_directional_covariance_symmetric_positive_definite():
+    base = [0.1, 0.1, 0.1, 0.01, 0.01, 0.01]
+    cov = directional_covariance(base, np.array([0.6, -0.8, 0.0]), 10.0)
     assert cov.shape == (6, 6)
     np.testing.assert_allclose(cov, cov.T, atol=1e-14)
-    eigs = np.linalg.eigvalsh(cov)
-    assert eigs.min() > 0, f"covariance must be positive definite, min eig={eigs.min():.3e}"
+    assert np.linalg.eigvalsh(cov).min() > 0
 
 
-def test_directional_covariance_spectrum_axis_aligned():
-    """With v along x, translation block spectrum should be {σ²α², σ², σ²}."""
-    from scripts.run_pipeline import _directional_covariance
-
-    sigma = 0.1
-    alpha = 10.0
-    v = np.array([1.0, 0.0, 0.0])
-    cov = _directional_covariance(
-        base_sigmas=[sigma, sigma, sigma, 0.01, 0.01, 0.01],
-        eig_direction=v,
-        inflation_factor=alpha,
-    )
-    # GTSAM tangent order: rot block [0:3, 0:3], trans block [3:6, 3:6]
-    trans_block = cov[3:6, 3:6]
-    trans_eigs = np.sort(np.linalg.eigvalsh(trans_block))
-    expected = np.sort([sigma**2, sigma**2, (sigma * alpha) ** 2])
-    np.testing.assert_allclose(trans_eigs, expected, rtol=1e-10)
-
-    # Rotation block should be untouched: diag([rx², ry², rz²])
-    rot_block = cov[0:3, 0:3]
-    np.testing.assert_allclose(rot_block, np.diag([0.01**2] * 3), atol=1e-14)
+def test_directional_covariance_inflates_only_along_the_direction():
+    sigma, alpha = 0.1, 10.0
+    cov = directional_covariance([sigma] * 3 + [0.01] * 3, np.array([1.0, 0.0, 0.0]), alpha)
+    # GTSAM tangent order: rotation block [0:3, 0:3], translation block [3:6, 3:6].
+    trans_eigs = np.sort(np.linalg.eigvalsh(cov[3:6, 3:6]))
+    np.testing.assert_allclose(trans_eigs, np.sort([sigma**2, sigma**2, (sigma * alpha) ** 2]))
+    np.testing.assert_allclose(cov[0:3, 0:3], np.diag([0.01**2] * 3), atol=1e-14)
+    assert cov[3, 3] == pytest.approx((sigma * alpha) ** 2)
 
 
-def test_directional_covariance_falls_back_on_zero_eigenvector():
-    """Degenerate zero eigenvector should fall back to uniform inflation."""
-    from scripts.run_pipeline import _directional_covariance
-
-    sigma = 0.1
-    alpha = 10.0
-    cov = _directional_covariance(
-        base_sigmas=[sigma, sigma, sigma, 0.01, 0.01, 0.01],
-        eig_direction=np.zeros(3),
-        inflation_factor=alpha,
-    )
-    trans_block = cov[3:6, 3:6]
-    # Fallback path builds isotropic σ²α² along all axes
-    np.testing.assert_allclose(trans_block, np.diag([(sigma * alpha) ** 2] * 3), atol=1e-14)
+def test_directional_covariance_falls_back_on_zero_direction():
+    sigma, alpha = 0.1, 10.0
+    cov = directional_covariance([sigma] * 3 + [0.01] * 3, np.zeros(3), alpha)
+    np.testing.assert_allclose(cov[3:6, 3:6], np.diag([(sigma * alpha) ** 2] * 3), atol=1e-14)
 
 
-def test_build_edge_sigmas_directional_produces_ndarray():
-    """Directional mode returns (6,6) ndarray entries, not 6-tuples."""
-    from scripts.run_pipeline import _build_edge_sigmas
-
-    n = 15
+def _scores(n: int, runs: dict[tuple[int, int], float], direction=(1.0, 0.0, 0.0)) -> np.ndarray:
     scores = np.zeros((n, 7), dtype=np.float64)
     scores[:, 0] = 1.0
-    scores[5:13, 0] = 50.0  # 8-frame sustained run → should trigger
-    scores[5:13, 4:7] = np.array([1.0, 0.0, 0.0])  # eig_direction along x
-
-    edges = _build_edge_sigmas(
-        scores,
-        base_sigmas=[0.1, 0.1, 0.1, 0.01, 0.01, 0.01],
-        threshold=5.0,
-        inflation_factor=10.0,
-        ema_alpha=1.0,
-        min_consecutive=5,
-        sigma_mode="directional",
-    )
-    # Unflagged edges remain None
-    assert edges[0] is None and edges[14] is None
-    # Flagged edges are full 6x6 ndarrays (not 6-lists)
-    for i in range(5, 13):
-        assert isinstance(edges[i], np.ndarray), f"edge {i} type = {type(edges[i])}"
-        assert edges[i].shape == (6, 6)
+    for (a, b), value in runs.items():
+        scores[a:b, 0] = value
+    scores[:, 4:7] = direction
+    return scores
 
 
-def test_build_edge_sigmas_invalid_mode_raises():
-    """Unknown sigma_mode should fail fast."""
-    from scripts.run_pipeline import _build_edge_sigmas
+_DEG_CFG = {
+    "cond_threshold": 5.0,
+    "sigma_inflation_factor": 10.0,
+    "ema_alpha": 1.0,
+    "min_consecutive": 5,
+}
 
-    scores = np.zeros((3, 7), dtype=np.float64)
-    try:
-        _build_edge_sigmas(
-            scores,
-            base_sigmas=[0.1, 0.1, 0.1, 0.01, 0.01, 0.01],
-            threshold=5.0,
-            inflation_factor=10.0,
-            sigma_mode="invalid",
-        )
-    except ValueError as e:
-        assert "sigma_mode" in str(e)
-    else:
-        raise AssertionError("expected ValueError for unknown sigma_mode")
+
+def test_downgraded_edges_only_on_sustained_runs():
+    scores = _scores(20, {(5, 6): 100.0, (10, 18): 50.0})
+    poses = np.tile(np.eye(4), (20, 1, 1))
+    edges = downgraded_edge_covariances(scores, poses, [0.1] * 3 + [0.01] * 3, _DEG_CFG)
+    assert edges[5] is None
+    assert all(isinstance(edges[i], np.ndarray) and edges[i].shape == (6, 6) for i in range(10, 18))
+    assert edges[0] is None and edges[9] is None and edges[19] is None
+
+
+def test_downgraded_edges_express_the_direction_in_the_body_frame():
+    """A map-frame x direction is the body y axis of a pose turned by -90 deg about z."""
+    scores = _scores(10, {(0, 10): 50.0}, direction=(1.0, 0.0, 0.0))
+    yaw = -np.pi / 2
+    R = np.array([[np.cos(yaw), -np.sin(yaw), 0], [np.sin(yaw), np.cos(yaw), 0], [0, 0, 1]])
+    poses = np.tile(np.eye(4), (10, 1, 1))
+    poses[:, :3, :3] = R
+    sigma, alpha = 0.1, 10.0
+    edges = downgraded_edge_covariances(scores, poses, [sigma] * 3 + [0.01] * 3, _DEG_CFG)
+    trans = edges[5][3:6, 3:6]
+    assert trans[1, 1] == pytest.approx((sigma * alpha) ** 2)
+    assert trans[0, 0] == pytest.approx(sigma**2)
+
+
+def test_downgraded_edges_disabled_without_inflation():
+    scores = _scores(10, {(0, 10): 50.0})
+    cfg = {**_DEG_CFG, "sigma_inflation_factor": 1.0}
+    edges = downgraded_edge_covariances(scores, np.tile(np.eye(4), (10, 1, 1)), [0.1] * 6, cfg)
+    assert all(e is None for e in edges)

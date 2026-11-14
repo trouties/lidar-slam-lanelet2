@@ -1,28 +1,8 @@
-"""Coordinate transforms and point cloud operations."""
+"""Rigid-body transform of point clouds."""
 
 from __future__ import annotations
 
-import math
-
 import numpy as np
-
-
-def latlon_to_mercator(lat: float, lon: float) -> tuple[float, float]:
-    """Convert GPS latitude/longitude to local Mercator coordinates.
-
-    Uses a simple Mercator projection suitable for small-area mapping.
-
-    Args:
-        lat: Latitude in degrees.
-        lon: Longitude in degrees.
-
-    Returns:
-        Tuple of (x, y) in meters.
-    """
-    earth_radius = 6378137.0  # WGS84 equatorial radius
-    x = math.radians(lon) * earth_radius
-    y = math.log(math.tan(math.pi / 4 + math.radians(lat) / 2)) * earth_radius
-    return x, y
 
 
 def apply_transform(points: np.ndarray, T: np.ndarray) -> np.ndarray:

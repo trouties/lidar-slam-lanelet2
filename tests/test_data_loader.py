@@ -6,14 +6,15 @@ import numpy as np
 import pytest
 
 from src.data.kitti_loader import (
+    KITTI_VERTICAL_ANGLE_OFFSET_DEG,
     KITTIDataset,
+    correct_kitti_scan,
     load_calibration,
-    load_oxts,
     load_poses,
     load_timestamps,
     load_velodyne_bin,
 )
-from src.data.transforms import apply_transform, latlon_to_mercator
+from src.data.transforms import apply_transform
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -62,12 +63,6 @@ def kitti_root(tmp_path):
 # ---------------------------------------------------------------------------
 # Tests: transforms (existing, kept)
 # ---------------------------------------------------------------------------
-
-
-def test_latlon_to_mercator_returns_floats():
-    x, y = latlon_to_mercator(48.1351, 11.5820)
-    assert isinstance(x, float)
-    assert isinstance(y, float)
 
 
 def test_apply_transform_identity():
@@ -128,29 +123,6 @@ def test_load_calibration_values(kitti_root):
         dtype=np.float64,
     )
     np.testing.assert_array_almost_equal(calib["Tr"], expected_tr)
-
-
-# ---------------------------------------------------------------------------
-# Tests: load_oxts
-# ---------------------------------------------------------------------------
-
-
-def test_load_oxts_fields(tmp_path):
-    # Write 30 values (KITTI Raw oxts format)
-    values = list(range(30))
-    path = tmp_path / "oxts.txt"
-    path.write_text(" ".join(str(float(v)) for v in values) + "\n")
-
-    result = load_oxts(path)
-    assert result["lat"] == 0.0
-    assert result["lon"] == 1.0
-    assert result["alt"] == 2.0
-    assert result["roll"] == 3.0
-    assert result["pitch"] == 4.0
-    assert result["yaw"] == 5.0
-    assert result["vn"] == 6.0
-    assert result["ve"] == 7.0
-    assert result["vf"] == 8.0
 
 
 # ---------------------------------------------------------------------------
@@ -253,3 +225,57 @@ def test_dataset_missing_velodyne(tmp_path):
     (tmp_path / "sequences" / "00").mkdir(parents=True)
     ds = KITTIDataset(tmp_path, sequence="00")
     assert len(ds) == 0
+
+
+# ---------------------------------------------------------------------------
+# Tests: KITTI scan correction
+# ---------------------------------------------------------------------------
+
+_SCAN = np.array(
+    [
+        [10.0, 0.0, 0.0, 0.1],
+        [10.0, 10.0, -1.7, 0.2],
+        [30.0, 0.0, -1.73, 0.3],
+        [5.0, -3.0, 2.0, 0.4],
+        [-40.0, 25.0, -1.8, 0.5],
+    ],
+    dtype=np.float32,
+)
+
+
+def _spherical(xyz: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    xyz = xyz.astype(np.float64)
+    r_xy = np.hypot(xyz[:, 0], xyz[:, 1])
+    return (
+        np.linalg.norm(xyz, axis=1),
+        np.arctan2(xyz[:, 1], xyz[:, 0]),
+        np.degrees(np.arctan2(xyz[:, 2], r_xy)),
+    )
+
+
+def test_correct_kitti_scan_raises_elevation_only():
+    out = correct_kitti_scan(_SCAN)
+    assert out.shape == _SCAN.shape and out.dtype == _SCAN.dtype
+    rng0, az0, el0 = _spherical(_SCAN[:, :3])
+    rng1, az1, el1 = _spherical(out[:, :3])
+    np.testing.assert_allclose(rng1, rng0, rtol=1e-6)
+    np.testing.assert_allclose(az1, az0, atol=1e-6)
+    np.testing.assert_allclose(el1 - el0, KITTI_VERTICAL_ANGLE_OFFSET_DEG, atol=1e-4)
+    np.testing.assert_array_equal(out[:, 3], _SCAN[:, 3])
+
+
+def test_correct_kitti_scan_matches_kiss_icp():
+    pybind = pytest.importorskip("kiss_icp.pybind.kiss_icp_pybind")
+    xyz = _SCAN[:, :3].astype(np.float64)
+    reference = np.asarray(pybind._correct_kitti_scan(pybind._Vector3dVector(xyz)))
+    np.testing.assert_allclose(correct_kitti_scan(xyz), reference, atol=1e-9)
+
+
+def test_dataset_applies_correction_when_enabled(kitti_root):
+    raw = KITTIDataset(kitti_root, sequence="00")[0][0]
+    corrected = KITTIDataset(kitti_root, sequence="00", correct_scan=True)[0][0]
+    np.testing.assert_allclose(corrected, correct_kitti_scan(raw))
+    cfg = {"kitti_root": str(kitti_root), "correct_kitti_scan": True}
+    from_cfg = KITTIDataset.from_config(cfg, "00")[0][0]
+    np.testing.assert_array_equal(from_cfg, corrected)
+    assert not KITTIDataset.from_config({"kitti_root": str(kitti_root)}, "00").correct_scan

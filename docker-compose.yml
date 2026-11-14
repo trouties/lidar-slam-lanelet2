@@ -1,38 +1,28 @@
-# SUP-09 one-command reproduction stack.
+# One-command reproduction: the pipeline on the first 200 frames of KITTI 00.
 #
-# Usage (on a clean x86_64 Linux machine):
-#   git clone <repo> && cd lidar-slam-lanelet2
-#   docker compose build           # ~6-8 min, pip install dominates
-#   docker compose up              # ~1-2 min: hydrate subset + run pipeline
+#   docker compose build
+#   docker compose up
 #
-# Outputs land on the host under ./results/:
-#   - results/ape.txt          (n_frames=, ape_rmse=, ...)
-#   - results/trajectory.png   (BEV estimate vs ground truth)
-#
-# The 200-frame KITTI Seq 00 subset is cached under ./cache_sup09 on first
-# run so subsequent `docker compose up` invocations skip the download.
+# Outputs land on the host under ./results/docker/ (ape.txt, trajectory.png and the
+# pipeline outputs). The 200-frame subset is downloaded from
+# KITTI_SUBSET_URL on the first run and kept under ./data_subset; a subset
+# extracted there by hand (scripts/package_kitti_subset.py) is used as is.
 
 services:
-  sup09:
+  pipeline:
     build:
       context: .
-      dockerfile: docker/Dockerfile.sup09
-    image: lidar-slam-lanelet2-sup09:latest
+      dockerfile: docker/Dockerfile
+    image: lidar-slam-lanelet2:latest
     environment:
-      # GitHub Release asset URL. Override via shell env or a local .env file
-      # if you mirror the tarball elsewhere. Keeping the default empty lets
-      # the entrypoint fail fast with a clear message when neither a cached
-      # subset nor a URL is supplied.
-      SUP09_SUBSET_URL: "${SUP09_SUBSET_URL:-}"
-      SUP09_SUBSET_SHA256: "${SUP09_SUBSET_SHA256:-}"
+      KITTI_SUBSET_URL: "${KITTI_SUBSET_URL:-}"
+      KITTI_SUBSET_SHA256: "${KITTI_SUBSET_SHA256:-}"
       SEQUENCE: "00"
       MAX_FRAMES: "200"
     volumes:
-      - ./results:/app/results
-      - ./cache_sup09:/data
-    # Linux docker engine does not auto-map host.docker.internal; Docker Desktop
-    # does. Keeping the explicit mapping is harmless on both — it gives the
-    # acceptance harness (and any user serving the tarball from localhost) a
-    # reliable way to reach the host.
+      - ./results/docker:/app/results
+      - ./data_subset:/data
+    # Lets the container reach a tarball served from the host
+    # (scripts/docker_check.sh cold); Docker Desktop maps it by itself.
     extra_hosts:
       - "host.docker.internal:host-gateway"

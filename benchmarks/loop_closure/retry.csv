@@ -1,0 +1,8 @@
+sequence,retried,pass_verification,false_matches,true_max_drift_ratio_pct,false_min_drift_ratio_pct,kept_by_drift_check,false_kept,true_rejected,kept_drift_min_m,kept_drift_max_m,kept_error_median_m,kept_error_max_m
+00,545,114,10,0.369,19.986,104,0,0,3.22,13.38,0.933,1.529
+02,858,71,7,0.461,2.481,64,0,0,8.45,15.63,3.163,4.42
+05,55,0,0,,,0,0,0,,,,
+06,6,0,0,,,0,0,0,,,,
+07,119,0,0,,,0,0,0,,,,
+08,291,0,0,,,0,0,0,,,,
+09,50,0,0,,,0,0,0,,,,

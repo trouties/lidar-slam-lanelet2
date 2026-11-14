@@ -6,39 +6,10 @@ build/
 .pytest_cache/
 *.so
 .ruff_cache/
-refs/
-results/
-/cache/
-/cache_sup09/
-/logs/
-external/baselines/*/build/
-external/baselines/*/devel/
-external/baselines/*/results/*.txt
-# SUP-01 Phase E: per-fork-switch rollback snapshots of upstream config.
-# Git history is authoritative for rollback; these .bak_upstream files are
-# only kept in the working tree as a local convenience.
-external/baselines/**/*.bak_upstream
-/tmp/baseline_*.log
-CLAUDE.md
 .vscode/
 
-# SUP-06 uncertainty viz — only ship the minimum artifacts needed
-# for README rendering (2 animated GIFs + JSON report + loose CSV).
-# PNGs / tight CSV / trajectory .npy stay local for re-render only.
-benchmarks/uncertainty/*
-!benchmarks/uncertainty/ellipsoid_animation_00_loose.gif
-!benchmarks/uncertainty/ellipsoid_animation_00_tight.gif
-!benchmarks/uncertainty/sup06_report_00.json
-!benchmarks/uncertainty/marginal_cov_00_loose.csv
+# Local only: pipeline outputs, caches, the Docker subset.
+results/
+/cache/
+/data_subset/
 
-# SUP-08 — colcon build generates transient build/install/log trees we do
-# not want to track. Package source (ros2_ws/src/) stays in git.
-ros2_ws/build/
-ros2_ws/install/
-ros2_ws/log/
-
-# SUP-09 — compose acceptance run logs are transient. Keep only the canonical
-# artifacts (summary JSON + sha256 + the committed trajectory screenshot).
-benchmarks/sup09/build.log
-benchmarks/sup09/up.log
-benchmarks/sup09/http_server.log

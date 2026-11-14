@@ -20,29 +20,42 @@ def load_velodyne_bin(path: Path) -> np.ndarray:
     return points
 
 
-def load_oxts(path: Path) -> dict:
-    """Load GPS/IMU (OxTS) data from a KITTI Raw .txt file.
+# The HDL-64E intrinsic calibration shipped with KITTI places every beam
+# slightly too low, so flat ground appears to drop by ~3.6 mm per metre of
+# range. Each scan-to-map registration absorbs part of that distortion as a
+# pitch error, and the errors accumulate into vertical drift. The value is the
+# one KISS-ICP applies in its own KITTI dataloader.
+KITTI_VERTICAL_ANGLE_OFFSET_DEG = 0.205
 
-    Note: OxTS data is only available in KITTI Raw, not KITTI Odometry.
+
+def correct_kitti_scan(points: np.ndarray) -> np.ndarray:
+    """Raise every point's elevation angle by ``KITTI_VERTICAL_ANGLE_OFFSET_DEG``.
+
+    Range and azimuth are unchanged; extra columns (reflectance) are copied.
 
     Args:
-        path: Path to OxTS .txt file (single line, 30 space-separated values).
+        points: ``(N, 3)`` or ``(N, 4)`` array in the Velodyne frame.
 
     Returns:
-        Dictionary with lat, lon, alt, roll, pitch, yaw, and velocity fields.
+        Array of the same shape and dtype.
     """
-    values = np.loadtxt(path)
-    return {
-        "lat": float(values[0]),
-        "lon": float(values[1]),
-        "alt": float(values[2]),
-        "roll": float(values[3]),
-        "pitch": float(values[4]),
-        "yaw": float(values[5]),
-        "vn": float(values[6]),
-        "ve": float(values[7]),
-        "vf": float(values[8]),
-    }
+    # Rotating p by delta about the horizontal axis p x z_hat moves it towards
+    # the zenith along its own vertical plane. Rodrigues' formula reduces to
+    #   x' = x (cos d - sin d z / r_xy),  y' likewise,  z' = z cos d + sin d r_xy
+    # so only r_xy is needed per point.
+    xyz = points[:, :3].astype(np.float64)
+    r_xy = np.hypot(xyz[:, 0], xyz[:, 1])
+    c = np.cos(np.radians(KITTI_VERTICAL_ANGLE_OFFSET_DEG))
+    s = np.sin(np.radians(KITTI_VERTICAL_ANGLE_OFFSET_DEG))
+    # Points on the sensor's z-axis have no defined azimuth; leave them as is.
+    on_axis = r_xy <= 0.0
+    z_over_r = np.divide(xyz[:, 2], r_xy, out=np.zeros_like(r_xy), where=~on_axis)
+    horizontal_scale = np.where(on_axis, 1.0, c - s * z_over_r)
+    out = points.copy()
+    out[:, 0] = xyz[:, 0] * horizontal_scale
+    out[:, 1] = xyz[:, 1] * horizontal_scale
+    out[:, 2] = np.where(on_axis, xyz[:, 2], xyz[:, 2] * c + s * r_xy)
+    return out
 
 
 def load_calibration(path: Path) -> dict[str, np.ndarray]:
@@ -111,15 +124,19 @@ class KITTIDataset:
     timestamps, and calibration for a given sequence.
     """
 
-    def __init__(self, root_path: str | Path, sequence: str = "00") -> None:
+    def __init__(
+        self, root_path: str | Path, sequence: str = "00", correct_scan: bool = False
+    ) -> None:
         """Initialize dataset.
 
         Args:
             root_path: Root path to KITTI odometry dataset.
             sequence: Sequence number (e.g. "00", "01", ..., "21").
+            correct_scan: Apply :func:`correct_kitti_scan` to every scan.
         """
         self.root = Path(root_path).expanduser()
         self.sequence = sequence
+        self.correct_scan = correct_scan
 
         seq_dir = self.root / "sequences" / sequence
         self.velodyne_dir = seq_dir / "velodyne"
@@ -137,6 +154,15 @@ class KITTIDataset:
         self.timestamps = load_timestamps(self.times_path) if self.times_path.exists() else None
         self.poses = load_poses(self.poses_path) if self.poses_path.exists() else None
 
+    @classmethod
+    def from_config(cls, data_cfg: dict, sequence: str) -> KITTIDataset:
+        """Build from the ``data`` section of a pipeline config."""
+        return cls(
+            root_path=data_cfg["kitti_root"],
+            sequence=sequence,
+            correct_scan=bool(data_cfg.get("correct_kitti_scan", False)),
+        )
+
     def __len__(self) -> int:
         return len(self.scan_files)
 
@@ -153,6 +179,8 @@ class KITTIDataset:
             - timestamp: seconds from start, or None if unavailable
         """
         pointcloud = load_velodyne_bin(self.scan_files[idx])
+        if self.correct_scan:
+            pointcloud = correct_kitti_scan(pointcloud)
 
         pose = None
         if self.poses is not None and idx < len(self.poses):

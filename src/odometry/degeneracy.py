@@ -1,6 +1,6 @@
 """LiDAR degeneracy detection via ICP translation Hessian.
 
-Implements a Zhang 2016 ICRA-inspired degeneracy probe that runs
+Implements a degeneracy probe after Zhang et al. (ICRA 2016) that runs
 independently of KISS-ICP's internal state. For each frame pair (prev, cur)
 already registered by KISS-ICP, we compute a translation-block Hessian
 ``H_t = sum_i n_i n_i^T`` from point-to-plane correspondences between the
@@ -13,7 +13,12 @@ The 3x3 translation block is used rather than the full 6x6 Jacobian because
 the mixed translation/rotation units of the 6x6 form make its condition
 number depend on an arbitrary length scale. The 3x3 block is dimensionally
 consistent and directly corresponds to the unobserved translation direction
-in KITTI Seq 01 (highway) degeneracy.
+on a highway, where the scene constrains the lateral and vertical position
+but hardly the position along the road.
+
+The scores are a diagnostic of Stage 2 (``results/degeneracy_XX.csv``). Using
+them to relax the odometry edges of the pose graph did not help on KITTI
+(:func:`downgraded_edge_covariances`).
 """
 
 from __future__ import annotations
@@ -283,3 +288,131 @@ class DegeneracyAnalyzer:
             eig_direction=eig_direction,
             n_corr=int(normals.shape[0]),
         )
+
+
+def analyzer_from_config(cfg: dict) -> DegeneracyAnalyzer:
+    """Build the analyzer from the ``degeneracy`` config section."""
+    return DegeneracyAnalyzer(
+        max_correspondences=int(cfg.get("max_correspondences", 5000)),
+        normal_k=int(cfg.get("normal_k", 10)),
+        max_nn_dist=float(cfg.get("max_nn_dist", 1.0)),
+        voxel_size=float(cfg.get("voxel_size", 0.5)),
+        min_quality=float(cfg.get("min_quality", 0.0)),
+    )
+
+
+def scores_to_array(scores: list[DegeneracyScore]) -> np.ndarray:
+    """Serialize scores to an ``(N, 7)`` array.
+
+    Columns: ``[cond, lambda_min, lambda_max, n_corr, eig_dx, eig_dy, eig_dz]``.
+    Null placeholder rows contain NaN in cond/lambda/eig and 0 in n_corr.
+    """
+    out = np.full((len(scores), 7), np.nan, dtype=np.float64)
+    for i, s in enumerate(scores):
+        out[i, 0] = s.cond_number
+        out[i, 1] = s.lambda_min
+        out[i, 2] = s.lambda_max
+        out[i, 3] = float(s.n_corr)
+        if s.eig_direction is not None and s.eig_direction.shape == (3,):
+            out[i, 4:7] = s.eig_direction
+    return out
+
+
+def sustained_mask(
+    cond: np.ndarray, threshold: float, ema_alpha: float, min_consecutive: int
+) -> np.ndarray:
+    """Boolean ``(N,)`` mask of frames in a sustained run above ``threshold``.
+
+    The condition number fluctuates from frame to frame; a single frame above
+    the threshold says little about the scene. The series is smoothed with a
+    causal EMA, thresholded, and runs shorter than ``min_consecutive`` frames
+    are removed (morphological opening). NaN frames count as below threshold.
+    """
+    from scipy.ndimage import binary_dilation, binary_erosion
+
+    n = cond.shape[0]
+    if n == 0:
+        return np.zeros(0, dtype=bool)
+    safe = np.where(np.isfinite(cond), cond, 0.0)
+    smoothed = np.copy(safe)
+    for i in range(1, n):
+        smoothed[i] = ema_alpha * safe[i] + (1.0 - ema_alpha) * smoothed[i - 1]
+    struct = np.ones(max(min_consecutive, 1), dtype=bool)
+    eroded = binary_erosion(smoothed > threshold, structure=struct, border_value=0)
+    return np.asarray(binary_dilation(eroded, structure=struct, border_value=0), dtype=bool)
+
+
+def directional_covariance(
+    base_sigmas: list[float], direction: np.ndarray, inflation_factor: float
+) -> np.ndarray:
+    """6x6 odometry-edge covariance with the sigma along ``direction`` inflated.
+
+    Only the translation variance along ``direction`` (the least-observed
+    translation, in the frame the edge's noise is expressed in) is scaled by
+    ``inflation_factor**2``; the perpendicular translation and the rotation
+    keep their base sigmas.
+
+    Args:
+        base_sigmas: ``[tx, ty, tz, rx, ry, rz]`` in config order.
+        direction: ``(3,)`` direction; a zero or non-finite vector inflates
+            all three translation sigmas instead.
+        inflation_factor: Multiplier of the sigma along ``direction``.
+
+    Returns:
+        Symmetric PSD ``(6, 6)`` covariance in GTSAM tangent order
+        ``[rx, ry, rz, tx, ty, tz]``.
+    """
+    trans_var = np.square(np.asarray(base_sigmas[:3], dtype=np.float64))
+    rot_var = np.square(np.asarray(base_sigmas[3:6], dtype=np.float64))
+    cov = np.zeros((6, 6), dtype=np.float64)
+    cov[0:3, 0:3] = np.diag(rot_var)
+    v = np.asarray(direction, dtype=np.float64).reshape(3)
+    v_norm = float(np.linalg.norm(v))
+    if not np.isfinite(v_norm) or v_norm < 1e-8:
+        cov[3:6, 3:6] = np.diag(trans_var * inflation_factor**2)
+        return cov
+    v = v / v_norm
+    base_trans = np.diag(trans_var)
+    sigma_along_sq = float(v @ base_trans @ v)
+    # Rank-1 update: the variance along v becomes sigma_along^2 * factor^2.
+    cov[3:6, 3:6] = base_trans + (inflation_factor**2 - 1.0) * sigma_along_sq * np.outer(v, v)
+    return 0.5 * (cov + cov.T)
+
+
+def downgraded_edge_covariances(
+    scores: np.ndarray, poses: np.ndarray, base_sigmas: list[float], cfg: dict
+) -> list[np.ndarray | None]:
+    """Per-edge odometry covariances that relax the least-observed direction.
+
+    Edge ``i`` (pose ``i-1`` to ``i``) gets :func:`directional_covariance` when
+    frame ``i`` is in a sustained degenerate run, otherwise ``None`` (the base
+    noise). The Hessian eigenvector is computed from points in the map frame;
+    the noise of a GTSAM ``BetweenFactor<Pose3>`` is in the body frame of the
+    pose, so the direction is rotated into the frame of pose ``i``.
+
+    Stage 3 does not use this; ``scripts/loop_closure_study.py analyze``
+    compares the pose graph with and without it (docs/loop-closure.md).
+
+    Args:
+        scores: ``(N, 7)`` array from :func:`scores_to_array`.
+        poses: ``(N, 4, 4)`` odometry poses in the map frame.
+        base_sigmas: ``[tx, ty, tz, rx, ry, rz]`` odometry sigmas.
+        cfg: The ``degeneracy`` config section.
+    """
+    n = scores.shape[0]
+    edges: list[np.ndarray | None] = [None] * n
+    factor = float(cfg.get("sigma_inflation_factor", 1.0))
+    threshold = float(cfg.get("cond_threshold", 0.0))
+    if factor <= 1.0 or threshold <= 0 or n == 0:
+        return edges
+    sustained = sustained_mask(
+        scores[:, 0],
+        threshold=threshold,
+        ema_alpha=float(cfg.get("ema_alpha", 0.3)),
+        min_consecutive=int(cfg.get("min_consecutive", 5)),
+    )
+    for i in range(1, n):
+        if sustained[i]:
+            direction = poses[i, :3, :3].T @ scores[i, 4:7]
+            edges[i] = directional_covariance(base_sigmas, direction, factor)
+    return edges

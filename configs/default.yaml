@@ -1,8 +1,12 @@
-# Default configuration for LiDAR SLAM & Lanelet2 Lane-Level Mapping Pipeline
+# Configuration of scripts/run_pipeline.py and the study scripts.
 
 data:
   kitti_root: "~/data/kitti/odometry/dataset"
   sequence: "00"
+  # Raise every beam's elevation by 0.205 deg (KITTI HDL-64E intrinsic
+  # calibration error). Without it, odometry drift on KITTI 04 is 0.93 %
+  # instead of 0.39 %, almost all of it vertical. See docs/evaluation.md.
+  correct_kitti_scan: true
 
 kiss_icp:
   max_range: 100.0
@@ -10,140 +14,122 @@ kiss_icp:
   voxel_size: 1.0
 
 gtsam:
-  odom_sigmas: [0.1, 0.1, 0.1, 0.01, 0.01, 0.01]  # tx,ty,tz,rx,ry,rz
+  # Sigmas are [tx, ty, tz] in m and [rx, ry, rz] in rad, per factor.
+  # Odometry edge: from variance component estimation on the pose-graph
+  # residuals (no ground truth involved), rounded. An overly loose rotation
+  # sigma lets the graph bend the trajectory at almost no cost, so that small
+  # inconsistencies between loop closures turn into metre-level distortion.
+  # See docs/loop-closure.md.
+  odom_sigmas: [0.01, 0.01, 0.01, 0.0005, 0.0005, 0.0005]
   prior_sigmas: [0.01, 0.01, 0.01, 0.001, 0.001, 0.001]
-  loop_closure_sigmas: [0.05, 0.05, 0.05, 0.005, 0.005, 0.005]  # ICP-verified; tighter than odom
-  gps_sigmas: [0.5, 0.5, 1.0]  # x, y, z
+  # Refined loop closure: RMS error against KITTI ground truth on the loops of
+  # sequence 05 whose two ends both have an RTK-integer GPS fix. Elsewhere the
+  # ground truth is less accurate than the registration (docs/loop-closure.md).
+  loop_closure_sigmas: [0.1, 0.1, 0.1, 0.002, 0.001, 0.006]
 
-sup07:
-  # LiDAR degeneracy detection (Zhang 2016 ICRA-inspired).
-  # When enabled=false, Stage 2/3 behavior is identical to legacy (optimized cache bytes unchanged).
-  # Enabled by default as of SUP-07 Iter3 (2026-04-18): the directional sigma_mode
-  # path is APE-neutral on non-degenerate frames and strictly improves Seq 00.
+degeneracy:
+  # Per-frame condition number of the translation Hessian of the scan-to-scan
+  # registration (src/odometry/degeneracy.py), written to
+  # results/degeneracy_XX.csv as a Stage 2 diagnostic. Stage 3 does not use
+  # it: relaxing the odometry edges of degenerate frames did not improve the
+  # pose graph (docs/loop-closure.md).
   enabled: true
-  # Analyzer parameters locked (tuned via tune_sup07, see refs/sup-notes.md SUP-07):
-  # voxel_size=0.3 / min_quality=0.5 / normal_k=15 raises Seq 01 p50 cond
-  # from 4.4 to 12.4 (>2×Seq 00 p95), passing SUP-07 criterion 1 acceptance.
-  max_correspondences: 5000       # per-frame NN sampling cap
-  normal_k: 15                    # neighborhood PCA normal estimation
-  max_nn_dist: 1.0                # m; drop NN correspondences beyond this distance
-  voxel_size: 0.3                 # m; source/target pre-downsample voxel
-  min_quality: 0.5                # PCA quality gate (l2-l1)/l3; planar normals only
-  # Degeneracy trigger threshold (fit from eval_sup07 baseline; equals Seq 00 p95)
+  max_correspondences: 5000       # per-frame correspondence cap (random subsample)
+  normal_k: 15                    # neighbours of the PCA normal
+  max_nn_dist: 1.0                # m; correspondences farther apart are dropped
+  voxel_size: 0.3                 # m; voxel of both scans before matching
+  min_quality: 0.5                # keep planar neighbourhoods only, (l2-l1)/l3
+  # Frames above this are flagged in the CSV. It is the 95th percentile on
+  # KITTI 00, i.e. a definition of "unusual for an urban drive", not a
+  # physical limit.
   cond_threshold: 5.514
-  # Degeneracy response: only inflate tx/ty/tz; keep rotation (KISS-ICP rotation remains reliable on highway)
+  # Edge relaxation, used only by the comparison in
+  # scripts/loop_closure_study.py analyze: on frames in a run of at least
+  # min_consecutive frames above the threshold (after EMA smoothing), the
+  # sigma along the least-observed direction is multiplied by
+  # sigma_inflation_factor.
   sigma_inflation_factor: 10.0
-  # Inflation strategy:
-  #   "uniform"     — scale tx/ty/tz diagonal by inflation_factor (legacy, 2026-04-15 baseline)
-  #   "directional" — full 6x6 covariance, inflating only the variance along the
-  #                   least-observed ICP Hessian eigenvector (Zhang 2016 ICRA-faithful).
-  # Directional keeps the well-observed lateral / vertical translation tight,
-  # relaxing only the forward direction on highway frames — see refs/sup-notes.md SUP-07.
-  sigma_mode: "directional"
-  # Hysteresis: EMA smoothing + minimum consecutive exceedance. Prevents the
-  # detector from degenerating into an always-on flag (Seq 01 went from
-  # 1078/1101=97.9% triggered to localized spikes after hysteresis). See
-  # refs/sup-notes.md SUP-07 "Hysteresis" subsection.
   ema_alpha: 0.3
   min_consecutive: 5
 
-imu:
-  # Conservative noise: LiDAR between-factors dominate; IMU adds velocity/bias regularization.
-  # Tighter values (e.g. 0.3/0.03) cause divergence on KITTI Raw because:
-  #   (1) timestamp alignment is approximate (Odometry t=0 ≈ Raw drive t=0, not exact),
-  #   (2) OxTS outputs filtered navigation data, not raw IMU — preintegration model mismatch,
-  #   (3) R_imu_to_velo calibration residuals become systematic errors when IMU is trusted tightly.
-  # Result with 5.0/0.5: tight APE 9.22 m vs loose 11.53 m (-20%). Keep these values.
-  accel_noise_sigma: 5.0    # m/s²; intentionally loose — see note above
-  gyro_noise_sigma: 0.5     # rad/s; intentionally loose — see note above
-  accel_bias_sigma: 0.1     # random walk σ between consecutive LiDAR keyframes
-  gyro_bias_sigma: 0.01     # random walk σ between consecutive LiDAR keyframes
-
 loop_closure:
-  mode: v2                       # v1=distance, v2=scan_context, both=combined
-  distance_threshold: 15.0
   min_frame_gap: 100
   icp_fitness_threshold: 0.9
-  # Voxel size (m) for pre-ICP downsample. SUP-03 round-2 locked for
-  # KITTI 64-beam Velodyne; nuScenes 32-beam typically wants ~0.5.
+  # Voxel size (m) of the point-to-point ICP that verifies a candidate.
   icp_downsample_voxel: 1.0
   scan_context:
     num_rings: 20
     num_sectors: 60
     max_range: 80.0
-    distance_threshold: 0.4      # SC cosine distance threshold; ICP@0.9 is real quality gate
+    distance_threshold: 0.4      # SC cosine distance threshold for a candidate
     top_k: 25                    # ring-key candidates to re-rank per query
-    query_stride: 1              # query every N-th frame (1 = every frame for max recall)
-    max_matches_per_query: 5     # cap per-frame matches to control ICP cost; 0 = unlimited
-  # Switchable Constraints on loop closure factors (Sünderhauf 2012 / Agarwal 2013 DCS).
-  # Wraps *only* the loop closure BetweenFactor noise in an M-estimator so
-  # false-positive closures (Seq 00 v2 P=0.967 ⇒ ~88/2635 FP) are down-weighted
-  # rather than bent into the trajectory. Odometry / prior / IMU factors stay
-  # pure Gaussian.
-  #
-  # Defaults (kernel=none, scale=1.0) are a no-op and are stripped from the
-  # optimized-cache hash (src/cache/layered_cache.py) so SUP-04 / SUP-07 caches
-  # remain bit-exact.
-  robust_kernel: none            # none | huber | cauchy | gm | gemanmcclure | dcs
-  robust_scale: 1.0              # Huber/Cauchy k, GM c, DCS phi; unused when kernel=none
-
-ekf:
-  process_noise_pos: 0.1
-  process_noise_vel: 0.5
-  process_noise_rot: 0.01
-  measurement_noise_pos: 0.05
-  measurement_noise_rot: 0.01
+    # Query every 10th frame (about 1 s of driving). Loop closures from
+    # neighbouring frames of one revisit share the scene and the odometry
+    # prior, so their errors are correlated; querying every frame multiplied
+    # the weight of a revisit by its length.
+    query_stride: 10
+    max_matches_per_query: 5     # cap per-frame matches; 0 = unlimited
+  # Coarse-to-fine point-to-plane ICP that replaces the relative pose of every
+  # accepted candidate, started from the odometry prior. Stages are
+  # [voxel size m, max correspondence distance m].
+  refine:
+    stages: [[2.0, 5.0], [1.0, 2.0], [0.5, 1.0]]
+    max_iteration: 50
+  # A candidate rejected from the odometry prior is refined again from the
+  # Scan Context alignment (descriptor yaw, no translation) and verified from
+  # there: where the odometry has drifted beyond the verification ICP's reach,
+  # no candidate of a revisit could be accepted otherwise (docs/loop-closure.md).
+  retry_from_scan_context: true
+  # Reject loop closures that move the second scan, relative to the odometry,
+  # by more than this fraction of the path driven between the two scans.
+  # Above the odometry's worst per-sequence t_rel on KITTI (0.82 %); the
+  # retry's false matches need 2.48 % or more, its true ones at most 0.46 %.
+  max_drift_ratio: 0.01
+  # Optional M-estimator on loop-closure factors only. Off: with the settings
+  # above, a Cauchy kernel (scale 1) changes SE(3) APE by at most 0.03 m on
+  # KITTI 00-10 (docs/loop-closure.md).
+  robust_kernel: none            # none | cauchy
+  robust_scale: 1.0              # kernel scale in whitened units (sigmas)
 
 mapping:
-  master_voxel_size: 0.10      # master cache voxel (m); Stage 4→5 boundary, Stage 5 downsamples from here to voxel_size
-                               # Measured: voxel=0.05 triggers OOM on seq 00 (13.7 GB peak > 15 GB RAM)
-                               # 0.10 is still finer than working 0.15, peak ~2 GB stays safe
-  voxel_size: 0.15             # Stage 5 working voxel (m); matches lane marking width
-  max_range: 30.0              # per-frame point cloud max range filter (m); far points are ICP-uncertain
-  downsample_every: 500        # trigger incremental merge every N frames
-  road_z_min: -2.0             # road surface z lower bound (Velodyne frame, ground ~ -1.73 m)
-  road_z_max: -1.5             # road surface z upper bound
-  intensity_threshold: 0.40    # lane marking reflectance threshold (KITTI reflectance in [0,1])
-  dbscan_eps: 0.7              # DBSCAN cluster radius (m); bridges dashed lane marking fragments
-  dbscan_min_points: 40        # min core neighborhood; filters road reflection noise
-  curb_grid_size: 0.30         # curb detection xy grid cell size (m); 2× voxel_size to avoid snap aliasing
-  curb_z_min: -2.0             # curb z lower bound (matches road_z_min)
-  curb_z_max: -1.2             # curb z upper bound (ground + 0.5 m, captures step top edge)
-  curb_height_min: 0.10        # min step height (m); 0.08 hits voxel=0.15 snap noise (~0.03 σ)
-  curb_height_max: 0.25        # max step height (m); anything taller is classified as wall/vehicle/greenbelt
-  curb_road_z_top: -1.55       # road surface top z (m); cell must straddle this z (zmin<=top<zmax) to count as curb
-                               # set 5 cm below road_z_max=-1.5 to capture very short (~5 cm) curbs
-  curb_dbscan_eps: 0.6         # eps>=0.7 forms 2 m circular blob on sparse candidates (lin~0.7)
-                               # eps=0.6 + mp=10 + trim_k=1.2 makes clusters extend along the curb line
-                               # Measured (g=0.30 grid): good rate 21% vs 16% at eps=0.5
-  curb_dbscan_min_points: 10   # candidates ~2 pts/cell, mp=10 ≈ 5 cells (~1 m along line)
-  curb_trim_k: 1.2             # MAD trim tighter than lane (k=2.5), shapes blob into a line
-                               # k=1.2 corresponds to ~88% Gaussian retention, trims diagonal spread
+  # Map accumulated from the Stage 3 poses at this voxel (KITTI 00: 28 M
+  # points); the curb extraction re-voxelizes it to voxel_size.
+  master_voxel_size: 0.10
+  voxel_size: 0.15             # m; working voxel of the curb extraction
+  max_range: 30.0              # m; scan points farther away are not mapped
+  downsample_every: 500        # frames between incremental voxel merges
+  # Curbs: cells of an xy grid whose height range is a 10-25 cm step that
+  # straddles curb_road_z_top. Heights are in the frame of the nearest pose,
+  # where the road under the car is at about -1.73 m. The road falls away
+  # towards its edges, so a fixed straddle height misses many low curbs
+  # (docs/map-quality.md).
+  curb_grid_size: 0.30         # m; 2x voxel_size, so a cell holds several voxels
+  curb_z_min: -2.0             # m; height pre-filter
+  curb_z_max: -1.2
+  curb_height_min: 0.10        # m; minimum step height
+  curb_height_max: 0.25        # m; taller steps are walls, vehicles, vegetation
+  curb_road_z_top: -1.55       # m; 18 cm above the road under the car
+  curb_dbscan_eps: 0.6         # m; two grid cells
+  curb_dbscan_min_points: 10   # DBSCAN core neighbourhood size
+  curb_trim_k: 1.2             # MAD trim across the cluster axis, in robust sigmas
 
 export:
-  lat0: 49.0                       # synthetic WGS84 origin (near KITTI Karlsruhe); seq 00 has no real GPS
-  lon0: 8.4
-  polyline_bin_size: 0.5           # m; linear-cluster binning width (shared by lane/curb)
-  polyline_simplify_epsilon: 0.05  # m; RDP simplification tolerance; 0 disables; 0.05 is below Velodyne noise
-  lane:                            # lane marking classification thresholds (3 PCA tiers: thin/thick/area)
-    min_linearity: 0.75            # PCA xy linearity lower bound
-    min_length: 1.0                # m; principal-axis span below this is dropped as noise
-    line_thin_max_thickness: 0.8   # m; matches natural snap spread of dbscan_eps=0.7 + voxel=0.15
-    line_thick_max_thickness: 2.0  # m; beyond this goes to area (crosswalks / intersection paint)
-  curb:                            # curb classification thresholds (single category)
-                                   # Thresholds based on Stage 5 v4 measurements + stage6-curb-v1/v2/v3 benchmark
-                                   # v4 overall: median lin 0.91, median thk 0.46 m, median len 1.4 m
-    min_linearity: 0.75            # same as lane; "good" 0.80 is too strict, long-tail lin spans 0.85-0.97
-    min_length: 1.0                # m; v4 median 1.4 m, 1.5 m would cut half the clusters; 1.0 is 2× polyline_bin
-    max_thickness: 0.7             # m; "good" upper bound raised 0.5 → 0.7; absorbs v4 thickness long tail (max ~1.0 m)
-    trim_k: 1.0                    # secondary minor-axis MAD trim sigma factor (Stage 5 v4 already applies k=1.2 trim)
-                                   # only applied to clusters that fail solely on thickness after the first PCA
-                                   # k=1.0 is tighter than v4; measured seq 06/01/10 recovers 12+4+3 thick-tail clusters
+  # GNSS/INS logs of the KITTI Raw drives (OxTS). When the drive behind the
+  # sequence is present, the map is georeferenced with them (src/export/georef.py).
+  kitti_raw_root: ~/data/kitti_raw
+  lat0: 49.0                       # without a GNSS log: map origin placed here, axes on the UTM grid,
+  lon0: 8.4                        # not georeferenced
+  polyline_bin_size: 0.5           # m; bin width along a cluster when reducing it to a polyline
+  polyline_simplify_epsilon: 0.05  # m; Ramer-Douglas-Peucker tolerance; 0 disables
+  curb:                            # a curb cluster is exported if it is a line:
+    min_linearity: 0.75            # PCA linearity (l1-l2)/l1 in xy
+    min_length: 1.0                # m; extent along the principal axis (2-98 %)
+    max_thickness: 0.7             # m; extent across it, after an optional second trim
+    trim_k: 1.0                    # MAD trim of that second pass, in robust sigmas
 
 cache:
   enabled: true
-  root: "cache/kitti"          # relative to repo root; Stage 1-5 layered cache
-                               # see src/cache/layered_cache.py
+  root: "cache/kitti"          # relative to the repository root; see src/cache/layered_cache.py
 
 output:
   dir: "results"

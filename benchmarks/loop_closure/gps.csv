@@ -1,0 +1,4 @@
+sequence,loops,n,rtk_integer_share_of_frames,gt_vs_refined_vertical_median_m,gt_vs_refined_horizontal_median_m,icp_rms_rx_mrad,icp_rms_ry_mrad,icp_rms_rz_mrad,icp_rms_tx_m,icp_rms_ty_m,icp_rms_tz_m,refined_rms_rx_mrad,refined_rms_ry_mrad,refined_rms_rz_mrad,refined_rms_tx_m,refined_rms_ty_m,refined_rms_tz_m
+00,other,2814,0.172,0.384,0.556,4.07,1.97,10.28,0.721,0.566,0.56,1.96,1.03,10.01,0.421,0.553,0.564
+05,both ends RTK integer,1534,0.894,0.045,0.092,3.33,1.5,5.71,0.129,0.125,0.089,2.01,0.97,5.61,0.066,0.115,0.086
+05,other,477,0.894,0.344,0.183,2.49,1.05,2.19,0.165,0.171,0.409,1.45,0.66,2.07,0.135,0.151,0.415

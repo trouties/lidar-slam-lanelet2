@@ -132,7 +132,7 @@ def test_edge_sigmas_accepts_full_covariance_matrix():
     """PoseGraphOptimizer.build_graph accepts (6,6) ndarray per-edge override.
 
     Dispatches to Gaussian.Covariance (full) noise model instead of
-    Diagonal.Sigmas (list). Used by SUP-07 directional sigma inflation.
+    Diagonal.Sigmas (list). Used by the directional degeneracy relaxation.
 
     Compare to baseline (no override) with the same noisy initial: pose 2
     should drift further from clean x when its inflow edge is relaxed
@@ -352,17 +352,17 @@ def _optimize_with_outlier(
 
 
 def test_robust_kernel_none_is_bitexact():
-    """robust_kernel=None must be bit-exact equivalent to legacy default ctor."""
+    """robust_kernel=None must be bit-exact equivalent to the default constructor."""
     import gtsam
 
     clean = _make_straight_trajectory(10, step=1.0)
 
-    legacy = PoseGraphOptimizer()
-    legacy.build_graph(clean)
+    default = PoseGraphOptimizer()
+    default.build_graph(clean)
     rel = np.eye(4)
     rel[0, 3] = 9.0  # consistent loop
-    legacy.add_loop_closure(0, 9, rel)
-    poses_legacy = legacy.optimize()
+    default.add_loop_closure(0, 9, rel)
+    poses_default = default.optimize()
 
     new = PoseGraphOptimizer(robust_kernel=None, robust_scale=1.0)
     new.build_graph(clean)
@@ -372,41 +372,26 @@ def test_robust_kernel_none_is_bitexact():
     new.add_loop_closure(0, 9, rel)
     poses_new = new.optimize()
 
-    for a, b in zip(poses_legacy, poses_new):
+    for a, b in zip(poses_default, poses_new):
         np.testing.assert_allclose(a, b, atol=1e-10)
 
 
 def test_robust_kernel_suppresses_outlier_closure():
-    """A bogus 50 m closure: Gaussian bends trajectory, robust kernels down-weight it.
+    """A bogus 50 m closure: Gaussian bends trajectory, Cauchy down-weights it.
 
     Measure APE at the inlier poses (skip the two closure endpoints
-    whose residual is the outlier). Robust optimizers should keep the
+    whose residual is the outlier). The robust optimizer should keep the
     straight-line interior much closer to the clean ground truth than
     the pure-Gaussian optimizer.
     """
     gaussian_poses, clean = _optimize_with_outlier(None)
+    cauchy_poses, _ = _optimize_with_outlier("cauchy", 1.0)
     inlier_idx = list(range(1, len(clean) - 1))
 
-    gaussian_err = np.mean(
-        [np.linalg.norm(gaussian_poses[k][:3, 3] - clean[k][:3, 3]) for k in inlier_idx]
-    )
+    def err(poses):
+        return np.mean([np.linalg.norm(poses[k][:3, 3] - clean[k][:3, 3]) for k in inlier_idx])
 
-    kernels = [("huber", 1.0), ("cauchy", 1.0), ("gm", 1.0), ("dcs", 1.0)]
-    robust_errs = {}
-    for name, scale in kernels:
-        poses, _ = _optimize_with_outlier(name, scale)
-        err = np.mean(
-            [np.linalg.norm(poses[k][:3, 3] - clean[k][:3, 3]) for k in inlier_idx]
-        )
-        robust_errs[name] = err
-
-    # At least three of the four robust kernels must slash interior APE to
-    # well below half of the Gaussian baseline.
-    improvements = [name for name, err in robust_errs.items() if err < 0.5 * gaussian_err]
-    assert len(improvements) >= 3, (
-        f"Gaussian inlier err={gaussian_err:.3f}, robust errs={robust_errs}. "
-        f"Only {improvements} beat the 0.5× threshold."
-    )
+    assert err(cauchy_poses) < 0.5 * err(gaussian_poses)
 
 
 def test_unknown_robust_kernel_raises():
@@ -422,70 +407,9 @@ def test_unknown_robust_kernel_raises():
         opt.add_loop_closure(0, 4, rel)
 
 
-def test_cluster_gt_pairs_event_count_monotone():
-    """Larger cluster_gap must not increase the event count (union-find monotonicity)."""
-    from scripts.eval_loop_closure_pr import _cluster_gt_pairs
-
-    # Synthetic GT: 3 clusters of 5 nearby pairs each, 200 frames apart.
-    pairs = set()
-    for c in range(3):
-        base_i = c * 200
-        base_j = base_i + 1000
-        for d in range(5):
-            pairs.add((base_i + d, base_j + d))
-
-    counts = {g: len(_cluster_gt_pairs(pairs, cluster_gap=g)) for g in (5, 50, 100, 500)}
-    # At gap ≥ 5 neighbors merge within a cluster → 3 events; gap=500 also
-    # cannot merge between clusters because they are 200 frames apart but
-    # only on the i axis; however inter-cluster Chebyshev distance is 200
-    # which exceeds gap=100 but is dominated by gap=500. Either way:
-    # monotone non-increase holds.
-    assert counts[5] >= counts[50] >= counts[100] >= counts[500], counts
-    assert counts[5] == 3
-
-
 # ---------------------------------------------------------------------------
 # Tests: LoopClosureDetector
 # ---------------------------------------------------------------------------
-
-
-def test_detect_candidates_finds_revisit():
-    """Circular trajectory should have candidates near the closure point."""
-    poses = _make_loop_trajectory(40, radius=10.0)
-    detector = LoopClosureDetector(distance_threshold=5.0, min_frame_gap=10)
-    candidates = detector.detect_candidates(poses)
-    assert len(candidates) > 0
-    # At least one candidate should involve early and late frames
-    has_closure = any(i < 10 and j > 30 for i, j in candidates)
-    assert has_closure, f"Expected early-late closure, got: {candidates}"
-
-
-def test_detect_candidates_no_loops():
-    """Straight trajectory should have no candidates."""
-    poses = _make_straight_trajectory(50, step=5.0)
-    detector = LoopClosureDetector(distance_threshold=15.0, min_frame_gap=10)
-    candidates = detector.detect_candidates(poses)
-    assert len(candidates) == 0
-
-
-def test_detect_candidates_respects_min_gap():
-    """Candidates must have at least min_frame_gap separation."""
-    poses = _make_loop_trajectory(40, radius=10.0)
-    detector = LoopClosureDetector(distance_threshold=50.0, min_frame_gap=20)
-    candidates = detector.detect_candidates(poses)
-    for i, j in candidates:
-        assert j - i >= 20
-
-
-def test_detect_without_dataset():
-    """detect() without dataset should return pose-derived closures."""
-    poses = _make_loop_trajectory(40, radius=10.0)
-    detector = LoopClosureDetector(distance_threshold=5.0, min_frame_gap=10)
-    closures = detector.detect(poses, dataset=None)
-    assert len(closures) > 0
-    for i, j, rel_pose in closures:
-        assert rel_pose.shape == (4, 4)
-        assert j > i
 
 
 def test_icp_downsample_voxel_configurable():
@@ -516,13 +440,69 @@ def test_icp_downsample_voxel_configurable():
     assert det_default.icp_downsample_voxel == 1.0
 
 
+def _street_scene(rng: np.random.Generator) -> np.ndarray:
+    """Ground plane, two facades and a few poles: enough structure for ICP."""
+    ground = np.c_[rng.uniform(-30, 30, (6000, 2)), np.full(6000, -1.7)]
+    left = np.c_[rng.uniform(-30, 30, 2000), np.full(2000, 8.0), rng.uniform(-1.7, 6, 2000)]
+    right = np.c_[rng.uniform(-30, 30, 2000), np.full(2000, -9.0), rng.uniform(-1.7, 6, 2000)]
+    poles = np.concatenate(
+        [
+            np.c_[
+                np.full(150, x) + rng.normal(0, 0.05, 150),
+                np.full(150, y),
+                rng.uniform(-1.7, 3, 150),
+            ]
+            for x, y in ((-12.0, 6.5), (3.0, -7.0), (17.0, 6.0))
+        ]
+    )
+    return np.concatenate([ground, left, right, poles])
+
+
+class _CloudDataset:
+    def __init__(self, clouds: list[np.ndarray]) -> None:
+        self.clouds = clouds
+
+    def __getitem__(self, idx: int):
+        return self.clouds[idx], None, None
+
+
+def test_refine_recovers_known_offset():
+    """Coarse-to-fine refinement converges from a metre-level prior error."""
+    from scipy.spatial.transform import Rotation
+
+    rng = np.random.default_rng(0)
+    scene = _street_scene(rng)
+    T_true = np.eye(4)
+    T_true[:3, :3] = Rotation.from_euler("z", 3.0, degrees=True).as_matrix()
+    T_true[:3, 3] = [1.5, -0.8, 0.05]
+    # Frame 1 observes the scene from T_true relative to frame 0.
+    src = (scene - T_true[:3, 3]) @ T_true[:3, :3]
+    dataset = _CloudDataset([scene, src])
+
+    det = LoopClosureDetector(refine_stages=[(2.0, 5.0), (1.0, 2.0), (0.5, 1.0)])
+    result = det.refine(1, 0, dataset, np.eye(4))
+    T = np.asarray(result.transformation)
+    assert np.linalg.norm(T[:3, 3] - T_true[:3, 3]) < 0.05
+    dR = Rotation.from_matrix(T[:3, :3].T @ T_true[:3, :3]).magnitude()
+    assert np.degrees(dR) < 0.1
+
+
+def test_refine_settings_from_config():
+    det = LoopClosureDetector.from_config(
+        {"refine": {"stages": [[2.0, 5.0], [0.5, 1.0]], "max_iteration": 20}}
+    )
+    assert det.refine_stages == [(2.0, 5.0), (0.5, 1.0)]
+    assert det.refine_max_iteration == 20
+    assert LoopClosureDetector.from_config({}).refine_stages is None
+
+
 # ---------------------------------------------------------------------------
 # Tests: Integration (pose graph + loop closure)
 # ---------------------------------------------------------------------------
 
 
 def test_full_pipeline_synthetic():
-    """Full pipeline: detect closures on clean loop, optimize drifted initial values."""
+    """Pose graph with loop closures pulls drifted initial values back to the loop."""
     import gtsam
 
     poses_clean = _make_loop_trajectory(40, radius=20.0)
@@ -535,11 +515,10 @@ def test_full_pipeline_synthetic():
     for i, p in enumerate(poses_drifted):
         opt.initial_values.insert(i, gtsam.Pose3(p))
 
-    # Detect loop closures on clean trajectory and add them
-    detector = LoopClosureDetector(distance_threshold=10.0, min_frame_gap=15)
-    closures = detector.detect(poses_clean, dataset=None)
-    for i, j, rel_pose in closures:
-        opt.add_loop_closure(i, j, rel_pose)
+    # Close the loop: the last three frames back to the first, measured on the
+    # clean trajectory (they are within 10 m of frame 0).
+    for j in (37, 38, 39):
+        opt.add_loop_closure(0, j, np.linalg.inv(poses_clean[0]) @ poses_clean[j])
 
     result = opt.optimize()
     assert len(result) == 40

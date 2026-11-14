@@ -1,4 +1,4 @@
-"""Tests for Stage 5: map assembly and feature extraction."""
+"""Tests of the map accumulation and the curb extraction."""
 
 from __future__ import annotations
 
@@ -10,8 +10,6 @@ from src.mapping import (
     MapBuilder,
     cluster_points,
     extract_curbs,
-    extract_lane_markings,
-    extract_road_surface,
     save_features_geojson,
 )
 
@@ -122,40 +120,6 @@ def test_map_builder_max_range_filter():
 # ---------------------------------------------------------------------------
 
 
-def test_extract_road_surface_filters_by_height():
-    """Only points within [z_min, z_max] should be kept."""
-    ground = np.array([[0.0, 0.0, -1.73]])
-    wall = np.array([[0.0, 0.0, 0.5]])
-    roof = np.array([[0.0, 0.0, 3.0]])
-    points = np.vstack([ground, wall, roof])
-    intensities = np.array([0.3, 0.1, 0.1])
-
-    road_pts, road_int = extract_road_surface(points, intensities, z_min=-1.95, z_max=-1.45)
-
-    assert road_pts.shape == (1, 3)
-    np.testing.assert_allclose(road_pts[0], ground[0])
-    np.testing.assert_allclose(road_int, [0.3])
-
-
-def test_extract_lane_markings_intensity_threshold():
-    """Only points at/above intensity_threshold should survive."""
-    points = np.array(
-        [
-            [0.0, 0.0, -1.73],
-            [1.0, 0.0, -1.73],
-            [2.0, 0.0, -1.73],
-            [3.0, 0.0, -1.73],
-        ]
-    )
-    intensities = np.array([0.1, 0.5, 0.2, 0.9])
-
-    lane = extract_lane_markings(points, intensities, intensity_threshold=0.35)
-
-    assert lane.shape == (2, 3)
-    np.testing.assert_allclose(lane[0], [1.0, 0.0, -1.73])
-    np.testing.assert_allclose(lane[1], [3.0, 0.0, -1.73])
-
-
 def test_cluster_points_finds_two_groups():
     """Two spatially separated blobs should yield exactly two clusters."""
     rng = np.random.default_rng(42)
@@ -256,8 +220,7 @@ def test_cluster_points_drops_below_min_points_after_trim():
 
 
 def test_cluster_points_trim_disabled_is_regression_anchor():
-    """trim_k=None reproduces the pre-trim behavior — used as a regression
-    anchor so we can verify the new default against the legacy path."""
+    """trim_k=None is plain DBSCAN: every point of the cluster is kept."""
     rng = np.random.default_rng(4)
     line = np.column_stack(
         [
@@ -475,7 +438,7 @@ def test_save_features_geojson_writes_valid_json(tmp_path):
     ]
     out = tmp_path / "features.geojson"
 
-    save_features_geojson(clusters, out, feature_type="lane_marking")
+    save_features_geojson(clusters, out, feature_type="curb")
 
     assert out.exists()
     with open(out) as f:
@@ -485,6 +448,6 @@ def test_save_features_geojson_writes_valid_json(tmp_path):
     assert len(data["features"]) == 2
     assert data["features"][0]["geometry"]["type"] == "MultiPoint"
     assert len(data["features"][0]["geometry"]["coordinates"]) == 2
-    assert data["features"][0]["properties"]["type"] == "lane_marking"
+    assert data["features"][0]["properties"]["type"] == "curb"
     assert data["features"][0]["properties"]["point_count"] == 2
     assert data["features"][1]["properties"]["point_count"] == 1

@@ -10,6 +10,7 @@ from src.optimization.scan_context import (
     compute_ring_key,
     make_scan_context,
     sc_distance,
+    sc_relative_yaw,
 )
 
 
@@ -63,11 +64,13 @@ class TestSCDistance:
         sc_a = make_scan_context(cloud)
         # Rotate 30° around z
         angle = np.radians(30)
-        R = np.array([
-            [np.cos(angle), -np.sin(angle), 0],
-            [np.sin(angle), np.cos(angle), 0],
-            [0, 0, 1],
-        ])
+        R = np.array(
+            [
+                [np.cos(angle), -np.sin(angle), 0],
+                [np.sin(angle), np.cos(angle), 0],
+                [0, 0, 1],
+            ]
+        )
         rotated = cloud @ R.T
         sc_b = make_scan_context(rotated)
         d = sc_distance(sc_a, sc_b)
@@ -90,11 +93,13 @@ class TestScanContextDatabase:
         clouds = []
         for i in range(5):
             rng = np.random.RandomState(i * 100)
-            c = np.column_stack([
-                rng.uniform(-30, 30, 3000),
-                rng.uniform(-30, 30, 3000),
-                rng.uniform(-1 + i, 3 + i, 3000),  # z offset per cloud
-            ])
+            c = np.column_stack(
+                [
+                    rng.uniform(-30, 30, 3000),
+                    rng.uniform(-30, 30, 3000),
+                    rng.uniform(-1 + i, 3 + i, 3000),  # z offset per cloud
+                ]
+            )
             clouds.append(c)
         for i, c in enumerate(clouds):
             sc = make_scan_context(c)
@@ -152,11 +157,13 @@ def _make_revisit_dataset(
     rng = np.random.RandomState(seed)
     base_clouds = []
     for i in range(n_unique):
-        c = np.column_stack([
-            rng.uniform(-30, 30, 3000),
-            rng.uniform(-30, 30, 3000),
-            rng.uniform(-1 + i * 2, 3 + i * 2, 3000),
-        ])
+        c = np.column_stack(
+            [
+                rng.uniform(-30, 30, 3000),
+                rng.uniform(-30, 30, 3000),
+                rng.uniform(-1 + i * 2, 3 + i * 2, 3000),
+            ]
+        )
         base_clouds.append(c)
 
     clouds = [base_clouds[k % n_unique] for k in range(n_frames)]
@@ -169,8 +176,9 @@ class TestDetectCandidatesSC:
     def test_returns_triples_with_distance(self):
         ds = _make_revisit_dataset(n_frames=150, n_unique=5)
         det = LoopClosureDetector(
-            mode="v2", min_frame_gap=10,
-            sc_distance_threshold=0.5, sc_query_stride=1,
+            min_frame_gap=10,
+            sc_distance_threshold=0.5,
+            sc_query_stride=1,
             sc_max_matches_per_query=0,
         )
         cands = det.detect_candidates_sc(ds, len(ds))
@@ -186,13 +194,16 @@ class TestDetectCandidatesSC:
     def test_multi_match_per_query(self):
         ds = _make_revisit_dataset(n_frames=200, n_unique=3)
         det = LoopClosureDetector(
-            mode="v2", min_frame_gap=10,
-            sc_distance_threshold=0.5, sc_query_stride=1,
-            sc_max_matches_per_query=0, sc_top_k=25,
+            min_frame_gap=10,
+            sc_distance_threshold=0.5,
+            sc_query_stride=1,
+            sc_max_matches_per_query=0,
+            sc_top_k=25,
         )
         cands = det.detect_candidates_sc(ds, len(ds))
         # With n_unique=3, many query frames should match multiple DB frames
         from collections import Counter
+
         query_counts = Counter(j for _, j, _ in cands)
         multi = [j for j, c in query_counts.items() if c > 1]
         assert len(multi) > 0, "Expected multiple matches per query frame"
@@ -200,14 +211,18 @@ class TestDetectCandidatesSC:
     def test_max_matches_per_query_caps(self):
         ds = _make_revisit_dataset(n_frames=200, n_unique=3)
         det_unlimited = LoopClosureDetector(
-            mode="v2", min_frame_gap=10,
-            sc_distance_threshold=0.5, sc_query_stride=1,
-            sc_max_matches_per_query=0, sc_top_k=25,
+            min_frame_gap=10,
+            sc_distance_threshold=0.5,
+            sc_query_stride=1,
+            sc_max_matches_per_query=0,
+            sc_top_k=25,
         )
         det_capped = LoopClosureDetector(
-            mode="v2", min_frame_gap=10,
-            sc_distance_threshold=0.5, sc_query_stride=1,
-            sc_max_matches_per_query=2, sc_top_k=25,
+            min_frame_gap=10,
+            sc_distance_threshold=0.5,
+            sc_query_stride=1,
+            sc_max_matches_per_query=2,
+            sc_top_k=25,
         )
         cands_unlimited = det_unlimited.detect_candidates_sc(ds, len(ds))
         cands_capped = det_capped.detect_candidates_sc(ds, len(ds))
@@ -217,6 +232,7 @@ class TestDetectCandidatesSC:
 
         # No query frame should exceed max_matches_per_query
         from collections import Counter
+
         query_counts = Counter(j for _, j, _ in cands_capped)
         for j, count in query_counts.items():
             assert count <= 2, f"Frame {j} has {count} matches, expected <= 2"
@@ -224,13 +240,15 @@ class TestDetectCandidatesSC:
     def test_query_stride(self):
         ds = _make_revisit_dataset(n_frames=200, n_unique=5)
         det_s1 = LoopClosureDetector(
-            mode="v2", min_frame_gap=10,
-            sc_distance_threshold=0.5, sc_query_stride=1,
+            min_frame_gap=10,
+            sc_distance_threshold=0.5,
+            sc_query_stride=1,
             sc_max_matches_per_query=1,
         )
         det_s5 = LoopClosureDetector(
-            mode="v2", min_frame_gap=10,
-            sc_distance_threshold=0.5, sc_query_stride=5,
+            min_frame_gap=10,
+            sc_distance_threshold=0.5,
+            sc_query_stride=5,
             sc_max_matches_per_query=1,
         )
         cands_s1 = det_s1.detect_candidates_sc(ds, len(ds))
@@ -242,3 +260,113 @@ class TestDetectCandidatesSC:
         # All query frames in stride-5 result should be multiples of 5
         for _, j, _ in cands_s5:
             assert j % 5 == 0, f"Frame {j} is not a multiple of stride 5"
+
+
+class TestRelativeYaw:
+    def test_recovers_rotation_and_direction(self):
+        """Rz(yaw) must rotate query-frame points into the matched scan's frame."""
+        rng = np.random.RandomState(7)
+        # Objects of random height scattered at all ranges and bearings, so
+        # that every sector has a distinct ring profile. (A scene where each
+        # sector holds a single ring makes several shifts tie, because the
+        # column distance ignores empty columns.)
+        n_obj = 400
+        r_obj = rng.uniform(4.0, 70.0, n_obj)
+        a_obj = rng.uniform(-np.pi, np.pi, n_obj)
+        h_obj = rng.uniform(-1.0, 6.0, n_obj)
+        walls = [
+            np.column_stack(
+                [
+                    r * np.cos(a) + rng.normal(0, 0.3, 20),
+                    r * np.sin(a) + rng.normal(0, 0.3, 20),
+                    rng.uniform(-1.7, h, 20),
+                ]
+            )
+            for r, a, h in zip(r_obj, a_obj, h_obj)
+        ]
+        match = np.vstack(walls)
+        for yaw_true in np.radians([30.0, 96.0, 222.0]):
+            # Query frame rotated by yaw_true w.r.t. the matched frame:
+            # p_match = Rz(yaw_true) p_query, so p_query = Rz(-yaw_true) p_match.
+            c, s_ = np.cos(-yaw_true), np.sin(-yaw_true)
+            query = match @ np.array([[c, -s_, 0], [s_, c, 0], [0, 0, 1]]).T
+            yaw = sc_relative_yaw(make_scan_context(query), make_scan_context(match))
+            err = np.angle(np.exp(1j * (yaw - yaw_true)))
+            assert abs(np.degrees(err)) <= 6.0
+
+
+def _scene(seed: int) -> np.ndarray:
+    """Ground plane plus posts and boxes of random height: structure for point-to-plane ICP."""
+    rng = np.random.RandomState(seed)
+    ground = np.column_stack(
+        [rng.uniform(-40, 40, 6000), rng.uniform(-40, 40, 6000), rng.normal(-1.73, 0.01, 6000)]
+    )
+    objs = []
+    for _ in range(120):
+        cx, cy = rng.uniform(-35, 35, 2)
+        w, d, h = rng.uniform(0.3, 4.0), rng.uniform(0.3, 4.0), rng.uniform(0.5, 6.0)
+        n = 150
+        face = rng.randint(0, 4, n)
+        u = rng.uniform(-0.5, 0.5, n)
+        x = np.where(face < 2, cx + (face - 0.5) * w, cx + u * w)
+        y = np.where(face < 2, cy + u * d, cy + (face - 2.5) * d)
+        objs.append(np.column_stack([x, y, rng.uniform(-1.73, -1.73 + h, n)]))
+    return np.vstack([ground, *objs])
+
+
+class TestRetryFromScanContext:
+    """The last scan revisits the first, but the odometry puts it 15 m away."""
+
+    yaw = np.radians(40.0)
+    shift = np.array([1.0, 0.0, 0.0])
+
+    def _setup(self):
+        n = 40
+        first = _scene(0)
+        # p_first = Rz(yaw) p_last + shift  ->  p_last = Rz(-yaw) (p_first - shift)
+        c, s = np.cos(-self.yaw), np.sin(-self.yaw)
+        last = (first - self.shift) @ np.array([[c, -s, 0], [s, c, 0], [0, 0, 1]]).T
+        clouds = [first] + [_scene(100 + k) for k in range(1, n - 1)] + [last]
+        poses = []
+        for k in range(n):
+            T = np.eye(4)
+            T[0, 3] = 20.0 * k
+            poses.append(T)
+        poses[-1] = np.eye(4)
+        poses[-1][0, 3] = 15.0  # odometry: 15 m from the start, no rotation
+        return _MockDataset(clouds), poses
+
+    def _detector(self, **kw):
+        return LoopClosureDetector(
+            min_frame_gap=10,
+            icp_fitness_threshold=0.9,
+            sc_distance_threshold=0.3,
+            refine_stages=[(2.0, 5.0), (1.0, 2.0), (0.5, 1.0)],
+            **kw,
+        )
+
+    def test_without_retry_the_revisit_is_missed(self):
+        ds, poses = self._setup()
+        assert self._detector().detect(poses, ds) == []
+
+    def test_retry_closes_it(self):
+        ds, poses = self._setup()
+        closures = self._detector(retry_from_scan_context=True, max_drift_ratio=0.02).detect(
+            poses, ds
+        )
+        assert [(i, j) for i, j, _ in closures] == [(0, len(poses) - 1)]
+        T = closures[0][2]
+        assert np.linalg.norm(T[:3, 3] - self.shift) < 0.1
+        assert abs(np.arctan2(T[1, 0], T[0, 0]) - self.yaw) < np.radians(0.5)
+
+    def test_drift_check_rejects_it_when_too_tight(self):
+        # The closure moves the last scan by about 14 m over about 1.5 km of path (0.9 %).
+        ds, poses = self._setup()
+        det = self._detector(retry_from_scan_context=True, max_drift_ratio=0.005)
+        assert det.detect(poses, ds) == []
+
+    def test_retry_needs_refinement(self):
+        import pytest
+
+        with pytest.raises(ValueError):
+            LoopClosureDetector(retry_from_scan_context=True)

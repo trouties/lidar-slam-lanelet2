@@ -1,0 +1,3 @@
+sequence,georeference,load_errors,ways_in_file,linestrings,polygons,lanelets,max_position_deviation_m
+00,gnss,0,249,249,0,0,0.000281
+01,gnss,0,305,305,0,0,0.000969

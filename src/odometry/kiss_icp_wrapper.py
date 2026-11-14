@@ -83,8 +83,7 @@ class KissICPOdometry:
                 provided, the method returns ``(poses, scores)`` where
                 ``scores[i]`` is the degeneracy probe for frame ``i``
                 against frame ``i-1`` (frame 0 is a null placeholder).
-                When ``None``, the method returns ``poses`` only, matching
-                the original signature for all non-SUP-07 callers.
+                When ``None``, the method returns ``poses`` only.
 
         Returns:
             ``list[poses]`` when ``degeneracy_analyzer`` is ``None``; else

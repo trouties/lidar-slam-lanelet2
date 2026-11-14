@@ -2,16 +2,18 @@
 
 from __future__ import annotations
 
+import json
 import xml.etree.ElementTree as ET
 from collections import Counter
 
 import numpy as np
+import pytest
 
+from src.export.georef import GeoReference, nominal_georeference
 from src.export.lanelet2_export import (
+    _pca_stats,
     _simplify_polyline_rdp,
-    classify_cluster,
     classify_curb_cluster,
-    cluster_to_polygon,
     cluster_to_polyline,
     export_lanelet2_osm,
 )
@@ -35,64 +37,6 @@ def _thin_line(
     return np.column_stack([x, y, z])
 
 
-def _thick_line(
-    n: int = 200,
-    length: float = 5.0,
-    sigma_y: float = 0.4,
-    seed: int = 1,
-) -> np.ndarray:
-    rng = np.random.default_rng(seed)
-    x = np.linspace(0.0, length, n)
-    y = rng.normal(0.0, sigma_y, n)
-    z = np.full(n, -1.73)
-    return np.column_stack([x, y, z])
-
-
-def _blob(n: int = 200, side: float = 4.0, seed: int = 2) -> np.ndarray:
-    """Roughly square blob in xy."""
-    rng = np.random.default_rng(seed)
-    xy = rng.uniform(-side / 2.0, side / 2.0, size=(n, 2))
-    z = np.full((n, 1), -1.73)
-    return np.hstack([xy, z])
-
-
-# ---------------------------------------------------------------------------
-# classify_cluster
-# ---------------------------------------------------------------------------
-
-
-def test_classify_thin_line_cluster():
-    label, stats = classify_cluster(_thin_line())
-    assert label == "line_thin"
-    assert stats["linearity"] > 0.9
-    assert stats["length"] >= 4.0
-    assert stats["thickness"] <= 0.8
-
-
-def test_classify_thick_line_cluster():
-    label, _ = classify_cluster(_thick_line())
-    assert label == "line_thick"
-
-
-def test_classify_area_blob():
-    label, stats = classify_cluster(_blob())
-    assert label == "area"
-    assert stats["thickness"] > 2.0
-
-
-def test_classify_too_short_returns_noise():
-    short = _thin_line(n=10, length=0.3)
-    label, _ = classify_cluster(short)
-    assert label == "noise"
-
-
-def test_classify_degenerate_returns_noise():
-    two = np.array([[0.0, 0.0, -1.73], [1.0, 0.0, -1.73]])
-    label, stats = classify_cluster(two)
-    assert label == "noise"
-    assert stats.get("degenerate") is True
-
-
 # ---------------------------------------------------------------------------
 # Geometry helpers
 # ---------------------------------------------------------------------------
@@ -102,8 +46,8 @@ def test_cluster_to_polyline_orders_along_axis():
     cluster = _thin_line(n=80, length=8.0)
     rng = np.random.default_rng(7)
     rng.shuffle(cluster)  # in-place row shuffle
-    label, stats = classify_cluster(cluster)
-    assert label == "line_thin"
+    stats = _pca_stats(cluster[:, :2])
+    assert not stats["degenerate"]
 
     polyline = cluster_to_polyline(cluster, stats, bin_size=0.5)
     assert polyline is not None
@@ -163,92 +107,8 @@ def test_simplify_polyline_short_input_passthrough():
     assert out.shape == (2, 3)
 
 
-def test_cluster_to_polygon_returns_four_corners():
-    cluster = _blob()
-    label, stats = classify_cluster(cluster)
-    assert label == "area"
-
-    polygon = cluster_to_polygon(cluster, stats)
-    assert polygon.shape == (4, 3)
-
-    # Polygon should bound the input points (within slack since we use
-    # full min/max in the helper, no percentile clipping).
-    px = polygon[:, 0]
-    py = polygon[:, 1]
-    slack = 1e-6
-    assert px.min() <= cluster[:, 0].min() + slack
-    assert px.max() >= cluster[:, 0].max() - slack
-    assert py.min() <= cluster[:, 1].min() + slack
-    assert py.max() >= cluster[:, 1].max() - slack
-
-
 # ---------------------------------------------------------------------------
-# End-to-end XML export
-# ---------------------------------------------------------------------------
-
-
-def test_export_lanelet2_osm_writes_valid_xml(tmp_path):
-    lane_clusters = [
-        _thin_line(n=80, length=6.0, seed=10),
-        _blob(n=300, side=5.0, seed=11),
-        _thin_line(n=10, length=0.3, seed=12),  # too short -> noise
-    ]
-    out = tmp_path / "map_test.osm"
-
-    counts = export_lanelet2_osm(lane_clusters, [], out)
-
-    # File exists and parses.
-    assert out.exists()
-    tree = ET.parse(out)
-    root = tree.getroot()
-    assert root.tag == "osm"
-    assert root.attrib.get("version") == "0.6"
-
-    # Exactly one bounds element.
-    bounds = root.findall("bounds")
-    assert len(bounds) == 1
-
-    # Way and tag inventory.
-    ways = root.findall("way")
-    assert len(ways) == 2  # one polyline + one area; the noise cluster is dropped
-    way_types = Counter(
-        tag.get("v") for w in ways for tag in w.findall("tag") if tag.get("k") == "type"
-    )
-    assert way_types["line_thin"] == 1
-    assert way_types["zebra_marking"] == 1
-
-    # Area way must close: first and last <nd ref> identical, and tagged area=yes.
-    area_way = next(
-        w
-        for w in ways
-        if any(t.get("k") == "type" and t.get("v") == "zebra_marking" for t in w.findall("tag"))
-    )
-    nd_refs = [nd.get("ref") for nd in area_way.findall("nd")]
-    assert len(nd_refs) >= 4
-    assert nd_refs[0] == nd_refs[-1]
-    assert any(t.get("k") == "area" and t.get("v") == "yes" for t in area_way.findall("tag"))
-
-    # Lane channel conservation invariant.
-    lane = counts["lane"]
-    assert lane["total_input"] == 3
-    assert lane["line_thin"] + lane["line_thick"] + lane["area"] + lane["dropped"] == 3
-    assert lane["line_thin"] == 1
-    assert lane["area"] == 1
-    assert lane["dropped"] == 1
-
-    # Curb channel: empty input -> all zeros.
-    curb = counts["curb"]
-    assert curb == {
-        "kept": 0,
-        "dropped": 0,
-        "rescued": 0,
-        "total_input": 0,
-        "total_length_m": 0.0,
-    }
-
-
-# ---------------------------------------------------------------------------
-# Curb classification (single label, separate from lane)
+# Curb classification
 # ---------------------------------------------------------------------------
 
 
@@ -341,61 +201,43 @@ def test_classify_curb_short_cluster_not_rescued_by_trim():
     assert stats.get("trim_applied") is not True
 
 
-def test_export_writes_curb_ways_without_polluting_lane(tmp_path):
-    lane_clusters = [
-        _thin_line(n=80, length=6.0, seed=30),
-        _blob(n=300, side=5.0, seed=31),
-        _thin_line(n=10, length=0.3, seed=32),  # noise
-    ]
+def test_export_writes_valid_osm_with_curb_ways(tmp_path):
     curb_clusters = [
         _curb_line(n=80, length=4.0, seed=40),
         _curb_line(n=80, length=3.0, seed=41),
         _curb_line(length=0.8, seed=42),  # too short -> noise
     ]
-    out_with_curb = tmp_path / "map_with_curb.osm"
-    out_lane_only = tmp_path / "map_lane_only.osm"
+    out = tmp_path / "map.osm"
+    curb = export_lanelet2_osm(curb_clusters, out)["curb"]
 
-    counts_with = export_lanelet2_osm(lane_clusters, curb_clusters, out_with_curb)
-    counts_only = export_lanelet2_osm(lane_clusters, [], out_lane_only)
-
-    # Lane-channel non-pollution: identical lane clusters must yield identical
-    # lane counts regardless of whether curb_clusters are present.
-    assert counts_with["lane"] == counts_only["lane"]
-
-    # Curb conservation.
-    curb = counts_with["curb"]
+    # Conservation; clean synthetic curbs do not need the trim retry.
     assert curb["total_input"] == 3
     assert curb["kept"] + curb["dropped"] == 3
     assert curb["kept"] == 2
     assert curb["dropped"] == 1
-    # Clean synthetic curbs do not need the trim retry.
     assert curb["rescued"] == 0
 
-    # OSM contains type=curb ways.
-    tree = ET.parse(out_with_curb)
-    root = tree.getroot()
-    way_types = Counter(
-        tag.get("v")
-        for w in root.findall("way")
-        for tag in w.findall("tag")
-        if tag.get("k") == "type"
-    )
-    assert way_types["curb"] == 2
-    # Lane ways still present and unchanged in count.
-    assert way_types["line_thin"] == 1
-    assert way_types["zebra_marking"] == 1
+    root = ET.parse(out).getroot()
+    assert root.tag == "osm"
+    assert root.attrib.get("version") == "0.6"
+    assert len(root.findall("bounds")) == 1
+    ways = root.findall("way")
+    assert len(ways) == 2
+    for w in ways:
+        tags = {t.get("k"): t.get("v") for t in w.findall("tag")}
+        assert tags["type"] == "curbstone"
+        assert "subtype" not in tags
+        assert "area" not in tags
+        for key in ("length_m", "thickness_m", "linearity", "vertex_count", "source_points"):
+            assert key in tags
+        assert int(tags["vertex_count"]) >= 2
 
-    # Curb ways must carry subtype=solid (Lanelet2 LineString convention).
-    curb_ways = [
-        w
-        for w in root.findall("way")
-        if any(t.get("k") == "type" and t.get("v") == "curb" for t in w.findall("tag"))
-    ]
-    assert len(curb_ways) == 2
-    for w in curb_ways:
-        assert any(t.get("k") == "subtype" and t.get("v") == "solid" for t in w.findall("tag"))
-        # Curb way must NOT be flagged as area.
-        assert not any(t.get("k") == "area" for t in w.findall("tag"))
+
+def test_export_with_no_clusters_writes_empty_map(tmp_path):
+    out = tmp_path / "empty.osm"
+    curb = export_lanelet2_osm([], out)["curb"]
+    assert curb == {"kept": 0, "dropped": 0, "rescued": 0, "total_input": 0, "total_length_m": 0.0}
+    assert ET.parse(out).getroot().findall("way") == []
 
 
 def test_export_rescued_counter_tracks_trim_recoveries(tmp_path):
@@ -406,7 +248,7 @@ def test_export_rescued_counter_tracks_trim_recoveries(tmp_path):
         _curb_line_with_outliers(seed=71),
     ]
     out = tmp_path / "map_rescue.osm"
-    counts = export_lanelet2_osm([], curb_clusters, out)
+    counts = export_lanelet2_osm(curb_clusters, out)
 
     curb = counts["curb"]
     assert curb["total_input"] == 2
@@ -414,7 +256,7 @@ def test_export_rescued_counter_tracks_trim_recoveries(tmp_path):
     assert curb["dropped"] == 0
     assert curb["rescued"] == 1
 
-    # Both should appear as type=curb ways in the OSM file.
+    # Both should appear as type=curbstone ways in the OSM file.
     tree = ET.parse(out)
     root = tree.getroot()
     way_types = Counter(
@@ -423,39 +265,7 @@ def test_export_rescued_counter_tracks_trim_recoveries(tmp_path):
         for tag in w.findall("tag")
         if tag.get("k") == "type"
     )
-    assert way_types["curb"] == 2
-
-
-def test_export_lane_ways_carry_geometry_metadata_tags(tmp_path):
-    lane_clusters = [
-        _thin_line(n=80, length=6.0, seed=80),
-        _blob(n=300, side=5.0, seed=81),
-    ]
-    out = tmp_path / "map_lane_meta.osm"
-    export_lanelet2_osm(lane_clusters, [], out)
-
-    tree = ET.parse(out)
-    ways = tree.getroot().findall("way")
-    assert len(ways) == 2
-
-    for way in ways:
-        tag_dict: dict[str, str] = {}
-        for t in way.findall("tag"):
-            k, v = t.get("k"), t.get("v")
-            if k is not None and v is not None:
-                tag_dict[k] = v
-
-        assert "length_m" in tag_dict
-        assert "thickness_m" in tag_dict
-        assert "linearity" in tag_dict
-        assert "vertex_count" in tag_dict
-        assert "source_points" in tag_dict
-        assert float(tag_dict["length_m"]) > 0
-        assert float(tag_dict["thickness_m"]) >= 0
-        assert 0.0 <= float(tag_dict["linearity"]) <= 1.0
-        assert int(tag_dict["vertex_count"]) >= 2
-        assert int(tag_dict["source_points"]) >= 3
-        assert "rescued" not in tag_dict
+    assert way_types["curbstone"] == 2
 
 
 def test_export_curb_way_rescued_tag_reflects_trim(tmp_path):
@@ -464,13 +274,13 @@ def test_export_curb_way_rescued_tag_reflects_trim(tmp_path):
         _curb_line_with_outliers(seed=91),  # thick-tail -> rescued=true
     ]
     out = tmp_path / "map_curb_meta.osm"
-    export_lanelet2_osm([], curb_clusters, out)
+    export_lanelet2_osm(curb_clusters, out)
 
     tree = ET.parse(out)
     curb_ways = [
         w
         for w in tree.getroot().findall("way")
-        if any(t.get("k") == "type" and t.get("v") == "curb" for t in w.findall("tag"))
+        if any(t.get("k") == "type" and t.get("v") == "curbstone" for t in w.findall("tag"))
     ]
     assert len(curb_ways) == 2
 
@@ -499,7 +309,7 @@ def test_export_total_length_metric_accumulates_kept_features(tmp_path):
         _curb_line(length=0.5, seed=102),  # too short -> dropped
     ]
     out = tmp_path / "map_length.osm"
-    counts = export_lanelet2_osm([], curb_clusters, out)
+    counts = export_lanelet2_osm(curb_clusters, out)
 
     curb = counts["curb"]
     assert curb["kept"] == 2
@@ -507,27 +317,86 @@ def test_export_total_length_metric_accumulates_kept_features(tmp_path):
     # Length is the PCA principal-axis 2-98 percentile span; expect
     # ~7.5-8.0m total for two ~4m segments.
     assert 7.0 <= curb["total_length_m"] <= 8.5
-    # Lane channel had no inputs, so its length is exactly 0.
-    assert counts["lane"]["total_length_m"] == 0.0
 
 
 def test_export_total_length_excludes_dropped_clusters(tmp_path):
     # Single short cluster -> all dropped, length must stay zero.
     out = tmp_path / "map_length_zero.osm"
-    counts = export_lanelet2_osm([], [_curb_line(length=0.5, seed=110)], out)
+    counts = export_lanelet2_osm([_curb_line(length=0.5, seed=110)], out)
     assert counts["curb"]["kept"] == 0
     assert counts["curb"]["dropped"] == 1
     assert counts["curb"]["total_length_m"] == 0.0
 
 
 def test_export_deterministic_ids(tmp_path):
-    lane_clusters = [_thin_line(n=80, length=6.0, seed=50)]
-    curb_clusters = [_curb_line(n=80, length=4.0, seed=51)]
+    curb_clusters = [_curb_line(n=80, length=4.0, seed=51), _curb_line(length=3.0, seed=52)]
     out_a = tmp_path / "a.osm"
     out_b = tmp_path / "b.osm"
 
-    export_lanelet2_osm(lane_clusters, curb_clusters, out_a)
-    export_lanelet2_osm(lane_clusters, curb_clusters, out_b)
+    export_lanelet2_osm(curb_clusters, out_a)
+    export_lanelet2_osm(curb_clusters, out_b)
 
     # Same input should produce byte-identical OSM (deterministic IDs).
     assert out_a.read_bytes() == out_b.read_bytes()
+
+
+# ---------------------------------------------------------------------------
+# Georeferencing and loading with Lanelet2
+# ---------------------------------------------------------------------------
+
+
+def _georef_rotated() -> GeoReference:
+    """Map frame rotated by 30 deg and tilted slightly against UTM."""
+    yaw, pitch = np.radians(30.0), 0.01
+    rz = np.array(
+        [[np.cos(yaw), -np.sin(yaw), 0.0], [np.sin(yaw), np.cos(yaw), 0.0], [0.0, 0.0, 1.0]]
+    )
+    ry = np.array(
+        [[np.cos(pitch), 0.0, np.sin(pitch)], [0.0, 1.0, 0.0], [-np.sin(pitch), 0.0, np.cos(pitch)]]
+    )
+    T = np.eye(4)
+    T[:3, :3] = rz @ ry
+    T[:3, 3] = [455395.5, 5425695.5, 117.1]
+    return GeoReference(map_to_utm=T, epsg=32632, source="gnss")
+
+
+def test_nominal_georeference_places_origin_on_the_utm_grid():
+    g = nominal_georeference(49.0, 8.4)
+    assert g.epsg == 32632
+    lat, lon, ele = g.to_latlon(np.array([[0.0, 0.0, -1.73]]))
+    assert abs(lat[0] - 49.0) < 1e-9 and abs(lon[0] - 8.4) < 1e-9
+    assert ele[0] == -1.73
+
+
+@pytest.mark.parametrize("georef", [None, _georef_rotated()], ids=["nominal", "gnss"])
+def test_lanelet2_loads_export_with_intended_geometry(tmp_path, georef):
+    """Lanelet2 reads every way, and its UTM projector reproduces the map-to-UTM geometry."""
+    lanelet2 = pytest.importorskip("lanelet2")
+    from lanelet2.io import Origin
+    from lanelet2.projection import UtmProjector
+
+    curb_clusters = [_curb_line(length=4.0, seed=12), _curb_line(length=3.0, seed=13)]
+    out = tmp_path / "map.osm"
+    export_lanelet2_osm(curb_clusters, out, georef=georef)
+
+    side = json.loads(out.with_suffix(".georef.json").read_text())
+    origin = side["lanelet2_origin"]
+    projector = UtmProjector(Origin(origin["lat"], origin["lon"]))
+    lmap, errors = lanelet2.io.loadRobust(str(out), projector)
+    assert errors == []
+
+    n_ways = len(ET.parse(out).getroot().findall("way"))
+    assert len(lmap.lineStringLayer) == n_ways == 2
+    assert len(lmap.laneletLayer) == 0
+
+    # Lanelet2 local = UTM - UTM(origin); the exporter's intended UTM is map_to_utm @ local_xyz.
+    T = np.asarray(side["map_to_utm"])
+    origin_utm = T[:3, 3]
+    # Lanelet2 turns the ``ele`` tag into the point's z. Recover the map-frame z from it
+    # through the third row of map_to_utm, then check the projected x, y.
+    r = T[2, :3]
+    for p in lmap.pointLayer:
+        x, y = float(p.attributes["local_x"]), float(p.attributes["local_y"])
+        z_map = (p.z - T[2, 3] - r[0] * x - r[1] * y) / r[2]
+        expected = T[:3, :3] @ np.array([x, y, z_map]) + T[:3, 3] - origin_utm
+        assert abs(p.x - expected[0]) < 1e-3 and abs(p.y - expected[1]) < 1e-3

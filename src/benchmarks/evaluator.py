@@ -1,15 +1,10 @@
-"""Pose file evaluation utilities.
-
-Wraps the evo toolkit to evaluate KITTI-format pose files.
-"""
+"""Pose file loading and the rotation-about-start APE datum."""
 
 from __future__ import annotations
 
 from pathlib import Path
 
 import numpy as np
-
-from src.odometry.kiss_icp_wrapper import evaluate_odometry
 
 
 def load_poses_kitti_format(path: str | Path) -> list[np.ndarray]:
@@ -31,19 +26,28 @@ def load_poses_kitti_format(path: str | Path) -> list[np.ndarray]:
     return poses
 
 
-def evaluate_pose_file(
-    est_path: str | Path,
-    gt_path: str | Path,
-) -> dict[str, dict]:
-    """Evaluate estimated poses against ground truth.
+def ape_rotation_about_start(est_xyz: np.ndarray, gt_xyz: np.ndarray) -> float:
+    """Translation APE RMSE with only the start position held fixed.
 
-    Both files must be in KITTI pose format (12 floats per line).
+    The estimate is rotated about its first position by the rotation that best
+    fits it to the reference, then compared point by point. This datum has
+    three free parameters and sits between first-frame comparison (none free)
+    and SE(3) alignment (six free). The drop from first-frame APE to this value
+    is the part of the error that a single orientation offset explains; the
+    further drop to SE(3) APE is what a free origin absorbs on top.
+
+    Args:
+        est_xyz: ``(N, 3)`` estimated positions.
+        gt_xyz: ``(N, 3)`` reference positions in the same frame.
 
     Returns:
-        Dictionary with ``'ape'`` and ``'rpe'`` sub-dicts, each containing
-        ``rmse``, ``mean``, ``median``, ``std``, ``min``, ``max``.
+        RMSE of the position error in metres.
     """
-    est = load_poses_kitti_format(est_path)
-    gt = load_poses_kitti_format(gt_path)
-    n = min(len(est), len(gt))
-    return evaluate_odometry(est[:n], gt[:n])
+    a = np.asarray(est_xyz, dtype=float) - est_xyz[0]
+    b = np.asarray(gt_xyz, dtype=float) - gt_xyz[0]
+    # Kabsch without centring: R maximises trace(R^T b^T a).
+    U, _, Vt = np.linalg.svd(b.T @ a)
+    D = np.diag([1.0, 1.0, np.sign(np.linalg.det(U @ Vt))])
+    R = U @ D @ Vt
+    err = a @ R.T - b
+    return float(np.sqrt(np.mean(np.sum(err**2, axis=1))))

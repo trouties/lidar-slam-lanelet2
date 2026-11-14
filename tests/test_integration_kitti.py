@@ -90,28 +90,18 @@ def test_kitti_seq00_smoke_pipeline(kitti_config, tmp_path):
         f"odometry={odom['ape_rmse']:.4f} m (200-frame window — no closures expected)"
     )
 
-    # --- Stage 4 contract ---
-    fused = summary["metrics"]["fused"]
-    assert "ape_rmse" in fused and fused["ape_rmse"] >= 0.0
-    # ESKF should not blow up (large factor difference vs optimized indicates divergence)
-    assert fused["ape_rmse"] < opt["ape_rmse"] * 2.0 + 1.0
-
-    # --- Stage 5 contract ---
-    s5 = summary["metrics"]["stage5"]
-    assert s5["working_point_count"] > 100_000, "Stage 5 working map suspiciously small"
-    assert s5["road_point_count"] > 0, "Stage 5 road extraction returned 0 points"
-    # Curb cluster count is non-deterministic on a 200-frame slice but should be > 0
-    assert s5["curb_cluster_count"] >= 0  # at minimum, the field exists
+    # --- Stage 4 / 5 contract ---
+    assert summary["metrics"]["map"]["point_count"] > 100_000, "map suspiciously small"
+    curbs = summary["metrics"]["curbs"]
+    assert curbs["working_point_count"] > 100_000, "working map suspiciously small"
+    assert curbs["curb_point_count"] > 0, "curb extraction returned no candidates"
+    assert curbs["curb_cluster_count"] >= 0
 
     # --- Stage 6 contract ---
-    s6 = summary["metrics"]["stage6"]
-    lane = s6["lane"]
-    curb = s6["curb"]
-    # Lanelet2 export must report all expected counter fields
-    for key in ("line_thin", "line_thick", "area", "dropped", "total_input", "total_length_m"):
-        assert key in lane, f"Stage 6 lane export missing field '{key}'"
+    export = summary["metrics"]["export"]
     for key in ("kept", "rescued", "dropped", "total_input", "total_length_m"):
-        assert key in curb, f"Stage 6 curb export missing field '{key}'"
+        assert key in export, f"Stage 6 curb export missing field '{key}'"
+    assert export["total_input"] == curbs["curb_cluster_count"]
 
     # The OSM file must have been written and be parseable as XML
     osm_path = tmp_path / f"map_{SEQUENCE}.osm"

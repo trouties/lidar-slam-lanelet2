@@ -1,27 +1,27 @@
-"""Layered cache for Stage 1-5 artifacts.
+"""Layered cache of the pipeline's expensive intermediate results.
 
-Goal: avoid re-running Stage 1-4 every time Stage 5 parameters change. Each
-pipeline stage has its own cache slot under ``cache/kitti/<seq>/`` with:
+Each stage has its own cache slot under ``cache/kitti/<seq>/``: a binary
+artifact (npz / geojson) and an entry in a shared ``metadata.yaml`` recording
+``config_hash``, ``upstream_hash``, the parameter snapshot, metrics and a
+timestamp.
 
-- binary artifact (npz / pcd / geojson)
-- an entry in a shared ``metadata.yaml`` recording ``config_hash``,
-  ``upstream_hash``, parameter snapshot, metrics, and timestamp.
+Invalidation: a stage cache loads only if (a) its own ``config_hash`` matches
+the current config subtree of that stage, and (b) its ``upstream_hash``
+matches the hash of the config subtrees of *all* upstream stages. Checking
+only the immediate upstream is not enough: a Stage 2 change leaves the map
+subtree untouched, yet the map was built from the old trajectory.
 
-Invalidation: a stage cache loads successfully only if (a) its own
-``config_hash`` matches the current config subtree relevant to that stage,
-and (b) its ``upstream_hash`` matches the current hash of the immediate
-upstream stage. Walking the chain transitively would be redundant because
-every stage stores its upstream, so fresh-computing the immediate hash is
-sufficient.
+Only the config is hashed, not the code. After changing a stage's
+implementation, invalidate that stage explicitly (``--force-rebuild``).
 
 Stages form a linear dependency chain::
 
-    odometry -> optimized -> fused -> map_master -> stage5
+    odometry -> optimized -> map -> curbs
 
-``map_master`` is the voxel=0.05m global map produced after Stage 4 fusion.
-It sits between Stage 4 and Stage 5 so that Stage 5 can re-downsample to its
-working voxel (default 0.15m) without re-running Stage 1-4 or the full
-per-frame aggregation.
+``map`` is the global map at ``mapping.master_voxel_size``, built from the
+Stage 3 poses. ``curbs`` holds the map re-voxelized to
+``mapping.voxel_size`` and the curb clusters extracted from it, so the curb
+parameters can change without re-running the per-frame accumulation.
 """
 
 from __future__ import annotations
@@ -36,23 +36,20 @@ import numpy as np
 import open3d as o3d
 import yaml
 
-# Linear dependency chain. Each entry's immediate predecessor (if any) is the
-# previous element of this list. ``invalidate(stage)`` clears this stage and
+# Linear dependency chain. ``invalidate(stage)`` clears this stage and
 # everything after it.
-STAGE_ORDER = ["odometry", "optimized", "fused", "map_master", "stage5"]
+STAGE_ORDER = ["odometry", "optimized", "map", "curbs"]
 
 # Artifact file names relative to the per-sequence cache directory.
 #
 # Point clouds are stored as ``.npz`` rather than ``.pcd`` because Open3D's
-# PCD writer quantizes the ``colors`` channel to uint8, which would corrupt
-# the float reflectance we tunnel through it (intensity aliases on the
-# ``0.40`` lane-marking threshold would otherwise flip cluster membership).
+# PCD writer quantizes the ``colors`` channel, which carries the float
+# reflectance, to uint8.
 _STAGE_FILES: dict[str, list[str]] = {
     "odometry": ["odometry.npz"],
     "optimized": ["optimized.npz"],
-    "fused": ["fused.npz"],
-    "map_master": ["global_map_master.npz"],
-    "stage5": ["stage5.npz", "stage5_features.geojson", "stage5_curbs.geojson"],
+    "map": ["map.npz"],
+    "curbs": ["curbs_map.npz", "curbs.geojson"],
 }
 
 
@@ -61,47 +58,30 @@ def _config_subtree(stage: str, config: dict) -> dict:
 
     The subtree is what gets hashed to decide whether the cached artifact for
     this stage is still valid. The result excludes ``data.sequence`` because
-    the cache is already partitioned per-sequence on disk, so including it
-    would just make the hash per-sequence without adding discriminating power.
+    the cache is already partitioned per-sequence on disk.
     """
     data_clean = {k: v for k, v in config.get("data", {}).items() if k != "sequence"}
     if stage == "odometry":
         return {"data": data_clean, "kiss_icp": config.get("kiss_icp", {})}
     if stage == "optimized":
-        # SUP-07 degeneracy downgrade changes per-edge noise models on the
-        # pose graph, so toggling sup07 must invalidate the optimized
-        # cache. We intentionally DO NOT put sup07 into the ``odometry``
-        # subtree because KISS-ICP registration itself is unaffected.
-        #
-        # SUP-?? Switchable Constraints: ``loop_closure.robust_kernel`` +
-        # ``robust_scale`` were added with a no-op default ("none", 1.0).
-        # Strip them from the hash when unset so pre-existing SUP-04 /
-        # SUP-07 caches (multi-hour to regenerate) stay valid.
-        lc = dict(config.get("loop_closure", {}))
-        _rk = lc.get("robust_kernel")
-        _rs = lc.get("robust_scale", 1.0)
-        if (_rk is None or (isinstance(_rk, str) and _rk.lower() in ("", "none"))) and float(
-            _rs
-        ) == 1.0:
-            lc.pop("robust_kernel", None)
-            lc.pop("robust_scale", None)
+        # The degeneracy settings change the odometry edge noise of the pose
+        # graph, not the KISS-ICP registration, so they belong here and not
+        # to the odometry subtree.
         return {
             "gtsam": config.get("gtsam", {}),
-            "loop_closure": lc,
-            "sup07": config.get("sup07", {}),
+            "loop_closure": config.get("loop_closure", {}),
+            "degeneracy": config.get("degeneracy", {}),
         }
-    if stage == "fused":
-        return {"ekf": config.get("ekf", {})}
-    if stage == "map_master":
+    if stage == "map":
         m = config.get("mapping", {})
         return {
             "master_voxel_size": m.get("master_voxel_size"),
             "max_range": m.get("max_range"),
             "downsample_every": m.get("downsample_every"),
         }
-    if stage == "stage5":
-        # Entire mapping subtree — changing any Stage 5 param invalidates the
-        # cluster list, but not the master map.
+    if stage == "curbs":
+        # The whole mapping subtree: any curb parameter invalidates the
+        # clusters, but not the map.
         return {"mapping": config.get("mapping", {})}
     raise ValueError(f"Unknown stage: {stage!r}")
 
@@ -110,11 +90,6 @@ def compute_hash(subtree: dict) -> str:
     """Return a 16-char SHA256 hex digest of a canonical YAML dump."""
     canonical = yaml.safe_dump(subtree, sort_keys=True, default_flow_style=False)
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
-
-
-def _upstream(stage: str) -> str | None:
-    idx = STAGE_ORDER.index(stage)
-    return STAGE_ORDER[idx - 1] if idx > 0 else None
 
 
 class LayeredCache:
@@ -153,10 +128,13 @@ class LayeredCache:
         return compute_hash(_config_subtree(stage, config))
 
     def _upstream_hash(self, stage: str, config: dict) -> str | None:
-        upstream = _upstream(stage)
-        if upstream is None:
+        # Hash the config of *every* upstream stage, not only the previous
+        # one: a Stage 2 change alters the poses that the map is built from
+        # even though the map's own and its parent's subtrees are unchanged.
+        idx = STAGE_ORDER.index(stage)
+        if idx == 0:
             return None
-        return self.hash_for(upstream, config)
+        return compute_hash({s: _config_subtree(s, config) for s in STAGE_ORDER[:idx]})
 
     def _is_fresh(self, stage: str, config: dict) -> bool:
         meta = self._load_metadata()
@@ -237,32 +215,30 @@ class LayeredCache:
         self._write_metadata_entry("odometry", config, metrics)
 
     # ------------------------------------------------------------------
-    # SUP-07 Degeneracy sidecar (independent of STAGE_ORDER)
+    # Degeneracy scores (independent of STAGE_ORDER)
     # ------------------------------------------------------------------
     #
-    # Stored alongside odometry because it is derived from the same KISS-ICP
-    # point-cloud stream. Not part of STAGE_ORDER because toggling it must
-    # not invalidate downstream stages by itself — that invalidation is
-    # handled by including ``sup07`` in the ``optimized`` subtree hash.
+    # Stored alongside odometry because they are computed from the same
+    # scan stream during Stage 2. Not part of STAGE_ORDER: the settings that
+    # decide how the scores enter the pose graph are in the ``optimized``
+    # subtree hash.
     #
-    # Freshness check composes two conditions:
-    #   (a) the odometry cache for this config is fresh (poses byte-match)
-    #   (b) the sup07 **analyzer** subtree (not threshold/inflation) hashes
-    #       the same as the last write
-    # Changing threshold or inflation does NOT invalidate this sidecar.
+    # Fresh when (a) the odometry cache for this config is fresh and (b) the
+    # analyzer settings (not the threshold or the inflation) hash the same as
+    # at the last write.
 
     _DEGENERACY_FILE = "degeneracy.npz"
     _DEGENERACY_META_KEY = "degeneracy"
 
     @staticmethod
-    def _sup07_analyzer_subtree(config: dict) -> dict:
-        sup07 = config.get("sup07", {}) or {}
+    def _degeneracy_analyzer_subtree(config: dict) -> dict:
+        d = config.get("degeneracy", {}) or {}
         return {
-            "max_correspondences": sup07.get("max_correspondences"),
-            "normal_k": sup07.get("normal_k"),
-            "max_nn_dist": sup07.get("max_nn_dist"),
-            "voxel_size": sup07.get("voxel_size"),
-            "min_quality": sup07.get("min_quality"),
+            "max_correspondences": d.get("max_correspondences"),
+            "normal_k": d.get("normal_k"),
+            "max_nn_dist": d.get("max_nn_dist"),
+            "voxel_size": d.get("voxel_size"),
+            "min_quality": d.get("min_quality"),
         }
 
     def _degeneracy_is_fresh(self, config: dict) -> bool:
@@ -272,7 +248,7 @@ class LayeredCache:
         entry = meta.get(self._DEGENERACY_META_KEY)
         if entry is None:
             return False
-        own_hash = compute_hash(self._sup07_analyzer_subtree(config))
+        own_hash = compute_hash(self._degeneracy_analyzer_subtree(config))
         if entry.get("config_hash") != own_hash:
             return False
         if entry.get("odometry_hash") != self.hash_for("odometry", config):
@@ -291,7 +267,7 @@ class LayeredCache:
         return data["scores"]
 
     def save_degeneracy(self, scores: np.ndarray, config: dict) -> None:
-        """Write the SUP-07 degeneracy sidecar.
+        """Write the per-frame degeneracy scores.
 
         ``scores`` must be ``(N, 7)`` matching :meth:`load_degeneracy`.
         """
@@ -300,10 +276,10 @@ class LayeredCache:
         np.savez_compressed(self.root / self._DEGENERACY_FILE, scores=arr)
         meta = self._load_metadata()
         meta[self._DEGENERACY_META_KEY] = {
-            "config_hash": compute_hash(self._sup07_analyzer_subtree(config)),
+            "config_hash": compute_hash(self._degeneracy_analyzer_subtree(config)),
             "odometry_hash": self.hash_for("odometry", config),
             "timestamp": datetime.now().isoformat(timespec="seconds"),
-            "params": self._sup07_analyzer_subtree(config),
+            "params": self._degeneracy_analyzer_subtree(config),
             "frame_count": int(arr.shape[0]),
         }
         self._save_metadata(meta)
@@ -319,80 +295,41 @@ class LayeredCache:
         np.savez_compressed(self.root / "optimized.npz", poses=np.asarray(poses))
         self._write_metadata_entry("optimized", config, metrics)
 
-    def load_fused(self, config: dict) -> np.ndarray | None:
-        if not self._is_fresh("fused", config):
+    def load_map(self, config: dict) -> o3d.geometry.PointCloud | None:
+        if not self._is_fresh("map", config):
             return None
-        data = np.load(self.root / "fused.npz")
-        return data["poses"]
+        return self._load_pcd_npz(self.root / "map.npz")
 
-    def save_fused(self, poses: np.ndarray, config: dict, metrics: dict | None = None) -> None:
-        self.root.mkdir(parents=True, exist_ok=True)
-        np.savez_compressed(self.root / "fused.npz", poses=np.asarray(poses))
-        self._write_metadata_entry("fused", config, metrics)
-
-    def load_global_map_master(self, config: dict) -> o3d.geometry.PointCloud | None:
-        if not self._is_fresh("map_master", config):
-            return None
-        return self._load_pcd_npz(self.root / "global_map_master.npz")
-
-    def save_global_map_master(
+    def save_map(
         self,
         pcd: o3d.geometry.PointCloud,
         config: dict,
         metrics: dict | None = None,
     ) -> None:
         self.root.mkdir(parents=True, exist_ok=True)
-        self._save_pcd_npz(pcd, self.root / "global_map_master.npz")
-        self._write_metadata_entry("map_master", config, metrics)
+        self._save_pcd_npz(pcd, self.root / "map.npz")
+        self._write_metadata_entry("map", config, metrics)
 
-    def load_stage5(
-        self, config: dict
-    ) -> tuple[o3d.geometry.PointCloud, list[np.ndarray], list[np.ndarray]] | None:
-        """Load the Stage 5 artifacts.
-
-        Returns:
-            ``(working_pcd, lane_clusters, curb_clusters)`` on a cache hit,
-            ``None`` otherwise. ``curb_clusters`` is an empty list when
-            the sequence has no curb features.
-        """
-        if not self._is_fresh("stage5", config):
+    def load_curbs(self, config: dict) -> tuple[o3d.geometry.PointCloud, list[np.ndarray]] | None:
+        """``(working-resolution map, curb clusters)``, or ``None`` when stale."""
+        if not self._is_fresh("curbs", config):
             return None
-        pcd = self._load_pcd_npz(self.root / "stage5.npz")
-        clusters = self._load_clusters_geojson(self.root / "stage5_features.geojson")
-        curbs = self._load_clusters_geojson(self.root / "stage5_curbs.geojson")
-        return pcd, clusters, curbs
+        pcd = self._load_pcd_npz(self.root / "curbs_map.npz")
+        curbs = self._load_clusters_geojson(self.root / "curbs.geojson")
+        return pcd, curbs
 
-    def save_stage5(
+    def save_curbs(
         self,
         pcd: o3d.geometry.PointCloud,
-        clusters: list[np.ndarray],
+        curb_clusters: list[np.ndarray],
         config: dict,
-        *,
-        curb_clusters: list[np.ndarray] | None = None,
         metrics: dict | None = None,
     ) -> None:
-        """Persist the Stage 5 artifacts.
-
-        Args:
-            pcd: Working-resolution global map.
-            clusters: Lane-marking clusters (``(k_i, 3)`` arrays).
-            config: Full pipeline config (for hashing).
-            curb_clusters: Optional curb clusters; defaults to an empty
-                list so the sibling ``stage5_curbs.geojson`` is always
-                written and the cache freshness check stays consistent.
-            metrics: Optional metrics dict stored in ``metadata.yaml``.
-        """
+        """Persist the working-resolution map and its curb clusters."""
         self.root.mkdir(parents=True, exist_ok=True)
-        self._save_pcd_npz(pcd, self.root / "stage5.npz")
-        self._save_clusters_geojson(
-            clusters, self.root / "stage5_features.geojson", feature_type="lane_marking"
-        )
-        self._save_clusters_geojson(
-            curb_clusters or [],
-            self.root / "stage5_curbs.geojson",
-            feature_type="curb",
-        )
-        self._write_metadata_entry("stage5", config, metrics)
+        self._save_pcd_npz(pcd, self.root / "curbs_map.npz")
+        self._save_clusters_geojson(curb_clusters, self.root / "curbs.geojson")
+        self._write_metadata_entry("curbs", config, metrics)
 
     # ------------------------------------------------------------------
     # Helpers
@@ -443,14 +380,9 @@ class LayeredCache:
     def _save_clusters_geojson(
         clusters: list[np.ndarray],
         path: Path,
-        feature_type: str = "lane_marking",
+        feature_type: str = "curb",
     ) -> None:
-        """Minimal GeoJSON dump of cluster points (same schema as Stage 5 output).
-
-        ``feature_type`` is written into each feature's ``properties.type``;
-        defaults to ``lane_marking`` for backward compatibility with the
-        existing lane-marking cache artifact.
-        """
+        """Minimal GeoJSON dump of cluster points (schema of ``save_features_geojson``)."""
         features: list[dict[str, Any]] = []
         for idx, cluster in enumerate(clusters):
             coords = [[float(x), float(y), float(z)] for x, y, z in cluster]

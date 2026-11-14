@@ -1,4 +1,4 @@
-"""Tests for NuScenesDataset loader (SUP-05).
+"""Tests for the NuScenesDataset loader.
 
 Uses lightweight mocks so the test suite does not require nuscenes-devkit
 or actual nuScenes data to run.
@@ -15,6 +15,7 @@ import pytest  # noqa: F401 (used via pytest.approx, pytest.fixture)
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _write_pcd_bin(path: Path, points: np.ndarray) -> None:
     """Write a nuScenes-format .pcd.bin file (N×5 float32)."""
@@ -35,14 +36,15 @@ def _quaternion_identity() -> list[float]:
 # Fixtures
 # ---------------------------------------------------------------------------
 
+
 @pytest.fixture()
 def temp_pcd_dir(tmp_path: Path) -> Path:
     """Create three synthetic .pcd.bin files and return the directory."""
     for i in range(3):
         pts = np.zeros((100, 5), dtype=np.float32)
         pts[:, 0] = np.linspace(1, 10, 100)  # x
-        pts[:, 3] = 128.0                    # intensity (mid-range)
-        pts[:, 4] = float(i % 32)            # ring index
+        pts[:, 3] = 128.0  # intensity (mid-range)
+        pts[:, 4] = float(i % 32)  # ring index
         _write_pcd_bin(tmp_path / f"frame_{i:06d}.pcd.bin", pts)
     return tmp_path
 
@@ -103,6 +105,7 @@ def mock_nusc(temp_pcd_dir: Path):
 # ---------------------------------------------------------------------------
 # Tests: NuScenesDataset
 # ---------------------------------------------------------------------------
+
 
 def test_import():
     """nuscenes_loader imports without errors."""

@@ -17,9 +17,9 @@ def _noise_from_override(
 
     Accepts either a length-6 list in config order ``[tx, ty, tz, rx, ry, rz]``
     (diagonal) or a ``(6, 6)`` ndarray in GTSAM tangent order
-    ``[rx, ry, rz, tx, ty, tz]`` (full Gaussian covariance). Used by
-    SUP-07 to switch between uniform tx/ty/tz inflation and directional
-    inflation sharing the same build path.
+    ``[rx, ry, rz, tx, ty, tz]`` (full Gaussian covariance). The degeneracy
+    downgrade uses both: uniform tx/ty/tz inflation and inflation along the
+    least-observed direction only.
     """
     if isinstance(override, np.ndarray):
         cov = np.asarray(override, dtype=np.float64)
@@ -35,45 +35,23 @@ def _make_robust(
     scale: float,
     base: gtsam.noiseModel.Base,
 ) -> gtsam.noiseModel.Base:
-    """Wrap a Gaussian base noise model in a robust M-estimator kernel.
-
-    Implements "switchable constraints" style outlier robustness on loop
-    closure factors via GTSAM's built-in robust kernel wrappers. ``DCS``
-    is the Agarwal et al. 2013 reformulation of Sünderhauf & Protzel 2012
-    switchable constraints that lives entirely inside the noise model
-    (no per-edge switch variable), so it is the ship-first Tier A path.
+    """Wrap a loop-closure noise model in a Cauchy M-estimator.
 
     Args:
-        kernel: One of ``None``, ``"none"``, ``"huber"``, ``"cauchy"``,
-            ``"gm"`` / ``"gemanmcclure"``, ``"dcs"``. Case-insensitive.
-        scale: Kernel scale parameter — Huber/Cauchy ``k``, Geman–McClure
-            ``c``, DCS ``phi``. Ignored when ``kernel`` is falsey.
-        base: Underlying Gaussian noise model (typically
-            :class:`noiseModel.Diagonal`).
+        kernel: ``None``, ``"none"`` or ``"cauchy"``. Case-insensitive.
+        scale: Cauchy ``k`` in whitened units (sigmas). Ignored when
+            ``kernel`` is off.
+        base: Gaussian noise model of the factor.
 
     Returns:
-        A :class:`noiseModel.Robust` wrapping ``base`` with the requested
-        M-estimator, or ``base`` unchanged when ``kernel`` is disabled.
+        ``base`` wrapped in :class:`noiseModel.Robust`, or ``base`` unchanged
+        when ``kernel`` is off.
     """
-    if kernel is None:
+    if kernel is None or kernel.lower() in ("", "none"):
         return base
-    key = kernel.lower()
-    if key in ("", "none"):
-        return base
-
-    m_est = gtsam.noiseModel.mEstimator
-    if key == "huber":
-        estimator = m_est.Huber.Create(float(scale))
-    elif key == "cauchy":
-        estimator = m_est.Cauchy.Create(float(scale))
-    elif key in ("gm", "gemanmcclure"):
-        estimator = m_est.GemanMcClure.Create(float(scale))
-    elif key == "dcs":
-        estimator = m_est.DCS.Create(float(scale))
-    else:
-        raise ValueError(
-            f"unknown robust kernel: {kernel!r} (expected none|huber|cauchy|gm|gemanmcclure|dcs)"
-        )
+    if kernel.lower() != "cauchy":
+        raise ValueError(f"unknown robust kernel: {kernel!r} (expected none|cauchy)")
+    estimator = gtsam.noiseModel.mEstimator.Cauchy.Create(float(scale))
     return gtsam.noiseModel.Robust.Create(estimator, base)
 
 
@@ -90,6 +68,7 @@ class PoseGraphOptimizer:
         prior_sigmas: list[float] | None = None,
         robust_kernel: str | None = None,
         robust_scale: float = 1.0,
+        loop_sigmas: list[float] | None = None,
     ) -> None:
         """Initialize optimizer.
 
@@ -101,11 +80,13 @@ class PoseGraphOptimizer:
                 the prior factor on pose 0. Defaults to tight values.
             robust_kernel: Optional M-estimator robust kernel wrapping
                 loop closure noise only (odometry + prior stay Gaussian).
-                ``None`` / ``"none"`` preserves legacy pure-Gaussian
-                behavior. See :func:`_make_robust` for supported names.
+                ``None`` / ``"none"`` keeps every factor Gaussian. See
+                :func:`_make_robust` for supported names.
             robust_scale: Kernel scale parameter passed through to
                 :func:`_make_robust`. Only read when ``robust_kernel`` is
                 an active kernel name.
+            loop_sigmas: 6-element [tx,ty,tz,rx,ry,rz] noise sigmas of the
+                loop-closure factors. Defaults to the odometry sigmas.
         """
         if odom_sigmas is None:
             odom_sigmas = [0.1, 0.1, 0.1, 0.01, 0.01, 0.01]
@@ -119,6 +100,11 @@ class PoseGraphOptimizer:
         self.prior_noise = gtsam.noiseModel.Diagonal.Sigmas(
             np.array([*prior_sigmas[3:], *prior_sigmas[:3]])
         )
+        self.loop_noise = (
+            self.odom_noise
+            if loop_sigmas is None
+            else gtsam.noiseModel.Diagonal.Sigmas(np.array([*loop_sigmas[3:], *loop_sigmas[:3]]))
+        )
 
         self.robust_kernel = robust_kernel
         self.robust_scale = float(robust_scale)
@@ -127,6 +113,26 @@ class PoseGraphOptimizer:
         self.initial_values = gtsam.Values()
         self.n_poses = 0
         self.result_values: gtsam.Values | None = None
+        self._marginals: gtsam.Marginals | None = None
+
+    @classmethod
+    def from_config(cls, gtsam_cfg: dict, lc_cfg: dict | None = None) -> PoseGraphOptimizer:
+        """The Stage 3 stochastic model from the ``gtsam`` and ``loop_closure`` sections.
+
+        Every script that builds a Stage 3 graph goes through here, so that a
+        sigma in the config means the same thing everywhere.
+        """
+        lc_cfg = lc_cfg or {}
+        kernel = lc_cfg.get("robust_kernel")
+        if isinstance(kernel, str) and kernel.lower() in ("", "none"):
+            kernel = None
+        return cls(
+            odom_sigmas=gtsam_cfg.get("odom_sigmas"),
+            prior_sigmas=gtsam_cfg.get("prior_sigmas"),
+            robust_kernel=kernel,
+            robust_scale=float(lc_cfg.get("robust_scale", 1.0)),
+            loop_sigmas=gtsam_cfg.get("loop_closure_sigmas"),
+        )
 
     def build_graph(
         self,
@@ -141,10 +147,10 @@ class PoseGraphOptimizer:
 
         Args:
             poses: List of 4x4 SE(3) pose matrices from odometry.
-            prior_indices: Frame indices that receive an absolute prior.
-                If ``None``, only frame 0 gets a prior (v3 default).
-                Use :func:`src.benchmarks.gnss_denial.make_prior_indices`
-                to generate indices for GNSS-denial experiments.
+            prior_indices: Frame indices that receive an absolute prior
+                on the full pose. If ``None``, only frame 0 gets one, which
+                fixes the datum (the graph's gauge freedom) without
+                constraining its shape.
             gt_poses: Ground-truth poses used as prior values when
                 *prior_indices* is given.  Falls back to estimated *poses*
                 if ``None``.
@@ -155,12 +161,12 @@ class PoseGraphOptimizer:
                 accepted per entry:
                   * ``list[float]`` of length 6 in config order
                     ``[tx, ty, tz, rx, ry, rz]`` — builds a diagonal noise
-                    model (SUP-07 ``uniform`` mode).
+                    model (degeneracy ``uniform`` mode).
                   * ``np.ndarray`` of shape ``(6, 6)`` in GTSAM tangent
                     order ``[rx, ry, rz, tx, ty, tz]`` — builds a full
-                    Gaussian covariance noise model (SUP-07 ``directional``
-                    mode, where only the degenerate translation axis is
-                    inflated via a rank-1 update).
+                    Gaussian covariance noise model (degeneracy
+                    ``directional`` mode, where only the degenerate
+                    translation axis is inflated via a rank-1 update).
         """
         self.graph = gtsam.NonlinearFactorGraph()
         self.initial_values = gtsam.Values()
@@ -212,18 +218,29 @@ class PoseGraphOptimizer:
             j: Target pose index.
             relative_pose: 4x4 relative SE(3) transform from i to j.
             sigmas: Optional 6-element [tx,ty,tz,rx,ry,rz] noise sigmas.
-                Uses odometry noise if not specified.
+                Defaults to the optimizer's loop-closure sigmas.
         """
         if sigmas is not None:
             noise = gtsam.noiseModel.Diagonal.Sigmas(np.array([*sigmas[3:], *sigmas[:3]]))
         else:
-            noise = self.odom_noise
+            noise = self.loop_noise
 
         # Robust M-estimator wrapping is loop-closure-only; odometry stays
         # strict Gaussian so normal between-factor geometry is preserved.
         noise = _make_robust(self.robust_kernel, self.robust_scale, noise)
 
         self.graph.add(gtsam.BetweenFactorPose3(i, j, gtsam.Pose3(relative_pose), noise))
+
+    def add_position_prior(self, i: int, position: np.ndarray, sigmas: list[float]) -> None:
+        """Constrain the position of pose ``i`` alone, as a GNSS fix would.
+
+        Args:
+            i: Pose index.
+            position: ``(3,)`` position in the map frame [m].
+            sigmas: ``[sx, sy, sz]`` in map axes [m].
+        """
+        noise = gtsam.noiseModel.Diagonal.Sigmas(np.asarray(sigmas, dtype=np.float64))
+        self.graph.add(gtsam.GPSFactor(i, gtsam.Point3(*np.asarray(position, dtype=float)), noise))
 
     def optimize(self) -> list[np.ndarray]:
         """Run Levenberg-Marquardt optimization.
@@ -235,20 +252,32 @@ class PoseGraphOptimizer:
         optimizer = gtsam.LevenbergMarquardtOptimizer(self.graph, self.initial_values, params)
         result = optimizer.optimize()
         self.result_values = result
+        self._marginals = None
 
         optimized_poses = []
         for i in range(self.n_poses):
             optimized_poses.append(result.atPose3(i).matrix())
         return optimized_poses
 
+    def marginals(self) -> gtsam.Marginals:
+        """GTSAM marginals at the optimum, computed once per :meth:`optimize`."""
+        if self.result_values is None:
+            raise RuntimeError("optimize() must be called before querying covariances")
+        if self._marginals is None:
+            self._marginals = gtsam.Marginals(self.graph, self.result_values)
+        return self._marginals
+
     def get_position_marginals(
         self,
         keys: list[int] | None = None,
     ) -> dict[int, np.ndarray]:
-        """Extract the 3x3 position marginal covariance for selected keys.
+        """3x3 position covariance of selected poses, in map axes.
 
-        GTSAM Pose3 uses tangent order [rx,ry,rz,tx,ty,tz], so the
-        translation block is ``cov[3:6, 3:6]``.
+        GTSAM perturbs a pose on the right, ``T * Exp(xi)`` with ``xi`` in
+        tangent order ``[rx, ry, rz, tx, ty, tz]``, so the translation block
+        ``cov[3:6, 3:6]`` of its marginal is expressed in the pose's own body
+        axes. It is rotated into map axes here, ``R cov R^T``; drawn as is in
+        the map, an ellipse would turn with the vehicle heading.
 
         Args:
             keys: Pose indices to query. ``None`` => all ``n_poses`` keys.
@@ -259,24 +288,42 @@ class PoseGraphOptimizer:
         Raises:
             RuntimeError: If :meth:`optimize` has not been called.
         """
-        if self.result_values is None:
-            raise RuntimeError("optimize() must be called before get_position_marginals()")
+        marginals = self.marginals()
         if keys is None:
             keys = list(range(self.n_poses))
-
-        marginals = gtsam.Marginals(self.graph, self.result_values)
-
         out: dict[int, np.ndarray] = {}
-        try:
-            key_vec = gtsam.KeyVector(keys)
-            joint = marginals.jointMarginalCovariance(key_vec)
-            for k in keys:
-                cov6 = np.asarray(joint.at(k, k))
-                out[k] = np.ascontiguousarray(cov6[3:6, 3:6])
-        except Exception:
-            for k in keys:
-                cov6 = np.asarray(marginals.marginalCovariance(k))
-                out[k] = np.ascontiguousarray(cov6[3:6, 3:6])
+        for k in keys:
+            R = self.result_values.atPose3(k).rotation().matrix()
+            cov = np.asarray(marginals.marginalCovariance(k))[3:6, 3:6]
+            out[k] = np.ascontiguousarray(R @ cov @ R.T)
+        return out
+
+    def relative_pose_covariances(self, first: int, others: list[int]) -> dict[int, np.ndarray]:
+        """Covariance of the relative pose ``T_first^-1 T_j`` for each ``j``.
+
+        In GTSAM tangent order ``[rx, ry, rz, tx, ty, tz]``, body axes of
+        pose ``j``. With right perturbations ``T_i Exp(d_i)``, the relative
+        pose is perturbed by ``d_j - Ad(T_ij^-1) d_i``, so its covariance
+        follows from the joint marginal of the two poses. Unlike an absolute
+        pose covariance, it does not depend on how the datum is fixed (the
+        prior on frame 0): a relative pose is an estimable quantity.
+        """
+        marginals = self.marginals()
+        others = [int(j) for j in others]
+        keys = list(dict.fromkeys([int(first), *others]))
+        joint = marginals.jointMarginalCovariance(gtsam.KeyVector(keys))
+        Ti = self.result_values.atPose3(first)
+        Sii = np.asarray(joint.at(first, first))
+        out: dict[int, np.ndarray] = {}
+        for j in others:
+            if j == first:
+                out[j] = np.zeros((6, 6))
+                continue
+            A = Ti.between(self.result_values.atPose3(j)).inverse().AdjointMap()
+            Sjj = np.asarray(joint.at(j, j))
+            Sji = np.asarray(joint.at(j, first))
+            S = Sjj + A @ Sii @ A.T - Sji @ A.T - A @ Sji.T
+            out[j] = 0.5 * (S + S.T)
         return out
 
     @property

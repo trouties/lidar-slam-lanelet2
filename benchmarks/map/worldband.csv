@@ -1,0 +1,3 @@
+sequence,source,road_z_min_m,road_z_max_m,frames_in_band
+00,optimized,-5.46,6.73,0.04
+00,gt,-4.35,15.63,0.028

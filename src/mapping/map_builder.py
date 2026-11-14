@@ -267,12 +267,11 @@ class MapBuilder:
     ) -> o3d.geometry.PointCloud:
         """Re-voxelize an already-aggregated map to a coarser resolution.
 
-        Used to go from the cached ``master_voxel_size`` (e.g. 0.05 m) master
-        cloud to the Stage 5 working ``voxel_size`` (e.g. 0.15 m) without
-        re-running the full per-frame accumulation. Reuses the numpy-native
-        ``_voxel_aggregate`` for memory safety — ``refs/conventions.md`` §7
-        forbids ``o3d.voxel_down_sample`` on aggregated state because it
-        thrashes sort buffers on large inputs.
+        Used to go from the cached map at ``master_voxel_size`` (0.10 m) to
+        the working ``voxel_size`` of the curb extraction (0.15 m) without
+        re-running the per-frame accumulation. Reuses the numpy
+        ``_voxel_aggregate``, whose memory stays bounded on maps of tens of
+        millions of points.
 
         Reflectance is preserved via the ``colors`` channel convention used
         by :py:meth:`finalize`.

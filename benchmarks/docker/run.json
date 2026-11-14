@@ -1,0 +1,13 @@
+{
+  "mode": "local",
+  "image_id": "sha256:53441e28e8c057b22920675b53cfe93a1aedffc4882eda18a16359ccb16353e0",
+  "subset_sha256": "3607e5b06ad2692b08170c6647391958fe8d0032c205e99b575ae4a42b87ee07",
+  "build_seconds": 272,
+  "run_seconds": 78,
+  "stage2_frames": 200,
+  "stage2_ape_first_m": 2.0103,
+  "stage2_ape_se3_m": 0.2174,
+  "stage3_frames": 200,
+  "stage3_ape_first_m": 2.0103,
+  "stage3_ape_se3_m": 0.2174
+}

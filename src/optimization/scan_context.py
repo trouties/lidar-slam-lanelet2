@@ -63,11 +63,16 @@ def compute_ring_key(sc: np.ndarray) -> np.ndarray:
     return sc.mean(axis=1).astype(np.float32)
 
 
-def _column_cosine_distance(sc_a: np.ndarray, sc_b: np.ndarray) -> float:
-    """Column-wise cosine distance between two scan contexts.
+def _column_cosine_distance(sc_a: np.ndarray, sc_b: np.ndarray) -> tuple[float, int]:
+    """Column-wise cosine distance between two scan contexts, and its best shift.
 
     Optimized: pre-compute column norms once, then rotate with
     index arithmetic instead of np.roll for each shift.
+
+    Returns:
+        ``(distance, shift)``: the smallest distance over all sector shifts
+        and the shift ``k`` that attains it (column ``c`` of ``sc_a`` matches
+        column ``(c + k) % S`` of ``sc_b``).
     """
     num_sectors = sc_a.shape[1]
     norms_a = np.linalg.norm(sc_a, axis=0)  # (S,)
@@ -76,7 +81,7 @@ def _column_cosine_distance(sc_a: np.ndarray, sc_b: np.ndarray) -> float:
     # dot_matrix[i, j] = sum over rings of sc_a[:, i] * sc_b[:, j]
     dot_matrix = sc_a.T @ sc_b  # (S, S)
 
-    best_dist = 1.0
+    best_dist, best_shift = 1.0, 0
     for shift in range(num_sectors):
         # For shift k, column i of sc_a aligns with column (i+k)%S of sc_b
         # cos_sim[i] = dot_matrix[i, (i+shift)%S] / (norms_a[i] * norms_b[(i+shift)%S])
@@ -90,8 +95,8 @@ def _column_cosine_distance(sc_a: np.ndarray, sc_b: np.ndarray) -> float:
         cos_sim = dots[valid] / (na[valid] * nb[valid])
         dist = 1.0 - cos_sim.mean()
         if dist < best_dist:
-            best_dist = dist
-    return float(best_dist)
+            best_dist, best_shift = dist, shift
+    return float(best_dist), best_shift
 
 
 def sc_distance(sc_a: np.ndarray, sc_b: np.ndarray) -> float:
@@ -103,7 +108,19 @@ def sc_distance(sc_a: np.ndarray, sc_b: np.ndarray) -> float:
     Returns:
         Distance in [0, 1]. Lower = more similar.
     """
-    return _column_cosine_distance(sc_a, sc_b)
+    return _column_cosine_distance(sc_a, sc_b)[0]
+
+
+def sc_relative_yaw(sc_query: np.ndarray, sc_match: np.ndarray) -> float:
+    """Yaw [rad] of the query scan's frame relative to the matched scan's frame.
+
+    A point at azimuth ``a`` in the query scan lies at ``a + yaw`` in the
+    matched scan, so ``Rz(yaw)`` rotates query-frame points into the matched
+    frame. The resolution is one sector (6 deg for 60 sectors).
+    """
+    num_sectors = sc_query.shape[1]
+    shift = _column_cosine_distance(sc_query, sc_match)[1]
+    return 2.0 * np.pi * shift / num_sectors
 
 
 class ScanContextDatabase:
